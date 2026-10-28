@@ -28,8 +28,8 @@ def save_map(mosaic, name, out_dir, meta=None):
     return png_path
 
 START = 0          # с какого по порядку кадра в папке мы будет взять
-COUNT = 50         # сколько кадров взять
-STRIDE = 3         # брать каждый кадр
+COUNT = 150         # сколько кадров взять
+STRIDE = 5         # брать каждый кадр
 WIDTH = 480        # рабочая ширина кадра
 LIT_THRESHOLD = 0.6   # больше число, значит мы обрезаем еще сильнее
 USE_CLAHE = False  # усиление контраста (на Aqualoc не нужно)
