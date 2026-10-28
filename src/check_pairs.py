@@ -2,7 +2,7 @@ import cv2
 import glob
 import os
 
-BASE = r"C:\Users\79211\Desktop\seabed-mosaic"
+BASE = r"C:\Users\79211\Desktop\seabed-modaic"
 paths = sorted(glob.glob(os.path.join(BASE, "data", "frames", "*.jpg")))[:30]
 
 orb = cv2.ORB_create(2000)

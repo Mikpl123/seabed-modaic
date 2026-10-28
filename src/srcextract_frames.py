@@ -3,8 +3,8 @@ import os
 import glob
 import numpy as np
 
-VIDEO = r"C:\Users\79211\Desktop\seabed-mosaic\data\videous\моё_видео1.mp4"   # поправь имя
-OUT = r"C:\Users\79211\Desktop\seabed-mosaic\data\frames"
+VIDEO = r"C:\Users\79211\Desktop\seabed-modaic\data\videous\моё_видео1.mp4"   # поправь имя
+OUT = r"C:\Users\79211\Desktop\seabed-modaic\data\frames"
 
 def extract_frames(video_path, out_dir, step=10, keep_ratio=0.6):
     os.makedirs(out_dir, exist_ok=True)

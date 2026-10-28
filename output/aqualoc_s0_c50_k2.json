@@ -1,0 +1,14 @@
+{
+  "file": "aqualoc_s0_c50_k2.png",
+  "width": 681,
+  "height": 643,
+  "crs": null,
+  "bounds": null,
+  "meters_per_pixel": null,
+  "source": "Aqualoc",
+  "start": 0,
+  "count": 50,
+  "stride": 2,
+  "frames_used": 38,
+  "frames_taken": 50
+}

@@ -3,7 +3,7 @@ import glob
 import os
 import re
 
-BASE = r"C:\Users\79211\Desktop\seabed-mosaic"
+BASE = r"C:\Users\79211\Desktop\seabed-modaic"
 SRC = os.path.join(BASE, "dataset")
 DST = os.path.join(BASE, "data", "frames")
 STEP = 4

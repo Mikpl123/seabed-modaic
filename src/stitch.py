@@ -5,7 +5,7 @@ import os
 import time
 import json
 
-BASE = r"C:\Users\79211\Desktop\seabed-mosaic"
+BASE = r"C:\Users\79211\Desktop\seabed-modaic"
 out_dir = os.path.join(BASE, "output")
 os.makedirs(out_dir, exist_ok=True)
 
@@ -33,8 +33,9 @@ STRIDE = 3         # брать каждый кадр
 WIDTH = 480        # рабочая ширина кадра
 LIT_THRESHOLD = 0.6   # больше число, значит мы обрезаем еще сильнее
 USE_CLAHE = False  # усиление контраста (на Aqualoc не нужно)
-CROP_DARK = True     # обрезать тёмные края кадров
+CROP_DARK = False     # обрезать тёмные края кадров
 FLAT_FIELD = False   # короче убирает затемнение по краям
+CROP = (0.2, 0.0, 0.3, 0.0)   # доли кадра, которые отрезаем: (сверху, снизу, слева, справа)
 
 paths = sorted(glob.glob(os.path.join(BASE, "data", "frames", "*.jpg")))
 print("Кадров в папке:", len(paths))
@@ -46,6 +47,9 @@ for p in paths:
     img = cv2.imread(p)
     if img is None:
         continue
+    t, b, l, r = CROP
+    h, w = img.shape[:2]
+    img = img[int(h * t):int(h * (1 - b)), int(w * l):int(w * (1 - r))]
     k = WIDTH / img.shape[1]
     img = cv2.resize(img, None, fx=k, fy=k)
     if USE_CLAHE:
@@ -83,6 +87,10 @@ print("Кадров для сшивки:", len(images))
 
 start = time.time()
 stitcher = cv2.Stitcher_create(cv2.Stitcher_SCANS)
+try:
+    stitcher.setSeamFinder(cv2.detail_VoronoiSeamFinder())
+except Exception as e:
+    print("Не удалось включить Voronoi:", e)
 status, mosaic = stitcher.stitch(images)
 print(f"Сшивка заняла {time.time() - start:.1f} сек, код {int(status)} (0 = успех)")
 
