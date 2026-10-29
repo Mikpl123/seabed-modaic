@@ -12,12 +12,14 @@ SRC = os.path.join(BASE, "dataset")        # папка со всеми кадр
 OUT = os.path.join(BASE, "output")
 START, END = 0, None                       # с какого по порядку кадра в папке мы будет взять (END= None - до конца)
 WIDTH = 480                                # рабочая ширина кадра
-MIN_SHIFT = 0.20                           # новый кадр берём, когда сдвиг >= 20% меньшей стороны
+MIN_SHIFT = 0.15                           # новый кадр берём, когда сдвиг >= 20% меньшей стороны
 CHECK_EVERY = 2                            # проверять каждый 2-й кадр
-NEIGHBORS = 3                              # с сколькими прошлыми ключевыми кадрами сопоставлять
-MIN_INLIERS = 15                           # минимум надёжных совпадений для связи
+NEIGHBORS = 5                              # с сколькими прошлыми ключевыми кадрами сопоставлять
+MIN_INLIERS = 10                           # минимум надёжных совпадений для связи
 MAX_SIDE = 4000                            # максимальный размер карты в пикселях
 LIGHT_POWER = 2.0                          # насколько сильно тёмные края теряют вес при смешивании
+DIST_POWER = 6.0                           # чем больше, тем меньше двоения (побеждает кадр, где точка ближе к центру)
+MAX_PARTS = 3                              # сколько самых больших кусков сохранять
 FLAT_FIELD = True                          # выравнивание света
 SCALE_PRIOR = 1e5                          # держать масштаб кадров близким к 1 (0 = выключить если срочно :D высота аппарата сильно меняется)
 
@@ -25,6 +27,10 @@ SCALE_PRIOR = 1e5                          # держать масштаб ка�
 def natural_key(s):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
 
+def fnum(path):
+    """Номер кадра из имени файла (frame000123.png -> 123)."""
+    m = re.findall(r"\d+", os.path.basename(path))
+    return int(m[-1]) if m else -1
 
 def load(path):
     img = cv2.imread(path)
@@ -55,7 +61,7 @@ def select_keyframes(paths):
 
 # зацепки ORB и связи между кадрами (New!!)
 clahe = cv2.createCLAHE(2.0, (8, 8))
-orb = cv2.ORB_create(2000, fastThreshold=5)
+orb = cv2.ORB_create(4000, fastThreshold=5)
 bf = cv2.BFMatcher(cv2.NORM_HAMMING)
 
 
@@ -157,8 +163,8 @@ def weight_map(h, w, L):
     m = np.zeros((h, w), np.uint8)
     m[2:-2, 2:-2] = 255
     d = cv2.distanceTransform(m, cv2.DIST_L2, 3)
-    d = np.minimum(d / (0.25 * min(h, w)), 1.0)
-    return (d ** 2) * (L ** LIGHT_POWER)
+    d = d / d.max()
+    return (d ** DIST_POWER) * (L ** LIGHT_POWER)
 
 
 def render(paths, poses):
@@ -237,19 +243,30 @@ def main():
                 edges.append((j, k, r[0], r[1]))
     print("Связей между кадрами:", len(edges))
 
-    comps = components(len(kpaths), edges)
-    print("Кусков (связных групп):", len(comps), ", размеры:", [len(c) for c in comps[:5]])
-    best = sorted(comps[0])
-    size = (load(kpaths[0]).shape[1], load(kpaths[0]).shape[0])
-    poses, rms = solve(best, edges, size)
-    print(f"Средняя невязка после подгонки: {rms:.2f} px (меньше 2 — хорошо)")
+    linked = {k for j, k, _, _ in edges}
+    breaks = [fnum(kpaths[k]) for k in range(1, len(keys)) if k not in linked]
+    print("Цепочка рвётся перед кадрами №:", breaks)
 
-    mosaic, valid = render([kpaths[i] for i in best], poses)
-    name = f"orb_s{START}_n{len(best)}"
-    save_map(mosaic, valid, name, {"source": "ORB + общая подгонка", "keyframes_used": len(best),
-                                   "frames_total": len(allp), "rms_px": round(rms, 3)})
-    print(f"Готово за {time.time() - t0:.0f} с. Файл: {name}.png, размер {mosaic.shape[1]}x{mosaic.shape[0]}")
-    return keys, best, poses
+    comps = components(len(kpaths), edges)
+    print("Кусков (связных групп):", len(comps), ", размеры:", [len(c) for c in comps[:8]])
+    size = (load(kpaths[0]).shape[1], load(kpaths[0]).shape[0])
+    results = []
+    for part, comp in enumerate(comps[:MAX_PARTS]):
+        if len(comp) < 5:
+            break
+        best = sorted(comp)
+        poses, rms = solve(best, edges, size)
+        print(f"Кусок {part}: ключевых кадров {len(best)}, "
+              f"кадры №{fnum(kpaths[best[0]])}-{fnum(kpaths[best[-1]])}, невязка {rms:.2f} px")
+        mosaic, valid = render([kpaths[i] for i in best], poses)
+        name = f"orb_s{START}_part{part}_n{len(best)}"
+        save_map(mosaic, valid, name, {"source": "ORB + общая подгонка", "keyframes_used": len(best),
+                                       "first_frame": fnum(kpaths[best[0]]), "last_frame": fnum(kpaths[best[-1]]),
+                                       "frames_total": len(allp), "rms_px": round(rms, 3)})
+        print(f"  Файл: {name}.png, размер {mosaic.shape[1]}x{mosaic.shape[0]}")
+        results.append((best, poses))
+    print(f"Готово за {time.time() - t0:.0f} с.")
+    return keys, results
 
 
 if __name__ == "__main__":
