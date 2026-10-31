@@ -1,7 +1,7 @@
 {
   "file": "orb_s0_part1_n31.png",
-  "width": 716,
-  "height": 784,
+  "width": 710,
+  "height": 803,
   "crs": null,
   "bounds": null,
   "meters_per_pixel": null,
@@ -10,5 +10,5 @@
   "first_frame": 5375,
   "last_frame": 6325,
   "frames_total": 6334,
-  "rms_px": 1.866
+  "rms_px": 2.001
 }

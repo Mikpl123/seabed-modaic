@@ -12,35 +12,49 @@ SRC = os.path.join(BASE, "dataset")        # папка со всеми кадр
 OUT = os.path.join(BASE, "output")
 START, END = 0, None                       # с какого по порядку кадра в папке мы будет взять (END= None - до конца)
 WIDTH = 480                                # рабочая ширина кадра
-MIN_SHIFT = 0.15                           # новый кадр берём, когда сдвиг >= 20% меньшей стороны
+MIN_SHIFT = 0.15                           # новый кадр берём, когда сдвиг >= 15% меньшей стороны
 CHECK_EVERY = 2                            # проверять каждый 2-й кадр
 NEIGHBORS = 5                              # с сколькими прошлыми ключевыми кадрами сопоставлять
-MIN_INLIERS = 25                           # минимум надёжных совпадений для связи
+MIN_INLIERS = 25                           # минимум надёжных совпадений для связи (как в запуске 6-7)
 MAX_SIDE = 4000                            # максимальный размер карты в пикселях
 LIGHT_POWER = 2.0                          # насколько сильно тёмные края теряют вес при смешивании
-DIST_POWER = 24.0                           # чем больше, тем меньше двоения (побеждает кадр, где точка ближе к центру)
+DIST_POWER = 24.0                          # чем больше, тем меньше двоения (побеждает кадр, где точка ближе к центру)
 MAX_PARTS = 3                              # сколько самых больших кусков сохранять
 FLAT_FIELD = True                          # выравнивание света
-SCALE_PRIOR = 1e5                          # держать масштаб кадров близким к 1 (0 = выключить если срочно :D высота аппарата сильно меняется)
+SCALE_PRIOR = 1e5                          # держать масштаб кадров близким к 1 (0 = выключить: карта схлопывается, см. запуски 9, 11)
+FEATURE = "orb"                           # "orb" (как в запусках 1-12) или "sift" (должен лучше цепляться за гладкий песок)
+MAX_PTS = 200                              # точек на связь в расчёте положения (было 80): надёжные связи весят больше
+IRLS_ITERS = 4                             # пересчётов с понижением веса спорных связей (1 = как раньше)
+SOLVER = "rigid"                           # "rigid": масштаб строго 1 (нет схлопывания); "similarity": масштаб свободный, как раньше
+GN_ITERS = 4                               # шагов Гаусса-Ньютона в первом проходе
+IRLS_C = 6.0                               # px: связи с невязкой около этого значения теряют половину веса
+BLEND = "two_band"                         # "two_band": свет смешиваем мягко, детали резко; "single": как раньше
+LOW_SIGMA = 12.0                           # граница между «светом» и «деталями», px
+LOW_POWER = 3.0                            # мягкость смешивания света (меньше = мягче)
+
 
 def natural_key(s):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
+
 
 def fnum(path):
     """Номер кадра из имени файла (frame000123.png -> 123)."""
     m = re.findall(r"\d+", os.path.basename(path))
     return int(m[-1]) if m else -1
 
+
 def load(path):
     img = cv2.imread(path)
     k = WIDTH / img.shape[1]
     return cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
 
+
 def hp_gray(img):
     g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
     return g - cv2.GaussianBlur(g, (0, 0), 15)          # убираем плавный свет
 
-# отбор кадров (New??????) надо как-то отдельно создать функцию в отедльном файле???? для скорости
+
+# отбор кадров
 def select_keyframes(paths):
     last = hp_gray(load(paths[0]))
     win = cv2.createHanningWindow((last.shape[1], last.shape[0]), cv2.CV_32F)
@@ -55,26 +69,35 @@ def select_keyframes(paths):
             last, since = cur, 0
     return keep
 
-# зацепки ORB и связи между кадрами (New!!)
+
+# зацепки ORB и связи между кадрами
 clahe = cv2.createCLAHE(2.0, (8, 8))
-orb = cv2.ORB_create(4000, fastThreshold=5)
-bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+if FEATURE == "sift":
+    detector = cv2.SIFT_create(nfeatures=4000, contrastThreshold=0.02)   # низкий порог: ловим слабые детали песка
+    bf = cv2.BFMatcher(cv2.NORM_L2)
+    RATIO = 0.8
+else:
+    detector = cv2.ORB_create(4000, fastThreshold=5)
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+    RATIO = 0.75
+
 
 def features(img, k=12, gain=25):
     g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
     mean = cv2.GaussianBlur(g, (0, 0), k)                                   # плавный фон (муть)
     std = np.sqrt(cv2.GaussianBlur((g - mean) ** 2, (0, 0), k)) + 2         # местный контраст
     g = np.clip(128 + gain * (g - mean) / std, 0, 255).astype(np.uint8)     # выравниваем контраст
-    kp, des = orb.detectAndCompute(g, None)
+    kp, des = detector.detectAndCompute(g, None)
     pts = np.float32([x.pt for x in kp]) if kp else np.zeros((0, 2), np.float32)
     return pts, des
+
 
 def match(fa, fb):
     (pa, da), (pb, db) = fa, fb
     if da is None or db is None or len(da) < 8 or len(db) < 8:
         return None
     pairs = [p for p in bf.knnMatch(da, db, k=2) if len(p) == 2]
-    good = [m for m, n in pairs if m.distance < 0.75 * n.distance]
+    good = [m for m, n in pairs if m.distance < RATIO * n.distance]
     if len(good) < MIN_INLIERS:
         return None
     A = pa[[m.queryIdx for m in good]]
@@ -86,6 +109,7 @@ def match(fa, fb):
     if inl.sum() < MIN_INLIERS:
         return None
     return A[inl], B[inl]
+
 
 def components(n, edges):
     parent = list(range(n))
@@ -102,21 +126,21 @@ def components(n, edges):
         groups.setdefault(find(i), []).append(i)
     return sorted(groups.values(), key=len, reverse=True)
 
-def solve(nodes, edges, size):
+
+def solve_similarity(nodes, edges, size):
     """Подбираем положение каждого кадра (поворот, масштаб, сдвиг) так,
-    чтобы одни и те же камни во всех кадрах легли в одно место."""
+    чтобы одни и те же камни во всех кадрах легли в одно место.
+    Связи, которые спорят с остальными, теряют вес (IRLS), а не тянут всю карту."""
     pos = {n: i for i, n in enumerate(nodes)}
     m = len(nodes)
     cx, cy = size[0] / 2, size[1] / 2
-    H = np.zeros((4 * m, 4 * m))
-    rhs = np.zeros(4 * m)
     rng = np.random.default_rng(0)
     used = []
     for j, k, A, B in edges:
         if j not in pos or k not in pos:
             continue
-        if len(A) > 80:
-            sel = rng.choice(len(A), 80, replace=False)
+        if len(A) > MAX_PTS:
+            sel = rng.choice(len(A), MAX_PTS, replace=False)
             A, B = A[sel], B[sel]
         u, v = A - (cx, cy), B - (cx, cy)
         J = np.zeros((2 * len(u), 8))
@@ -125,24 +149,33 @@ def solve(nodes, edges, size):
         J[1::2] = np.c_[u[:, 1], u[:, 0], np.zeros(len(u)), np.ones(len(u)),
                         -v[:, 1], -v[:, 0], np.zeros(len(u)), -np.ones(len(u))]
         ids = np.r_[4 * pos[j]:4 * pos[j] + 4, 4 * pos[k]:4 * pos[k] + 4]
-        H[np.ix_(ids, ids)] += J.T @ J
-        used.append((ids, J))
-    W = 1e6                                  # первый кадр закреплён
-    H[:4, :4] += W * np.eye(4)
-    rhs[:4] += W * np.array([1.0, 0, 0, 0])
-    p = np.linalg.solve(H, rhs)
-    # второй проход: мягко возвращаем масштаб кадров к 1 (высота аппарата почти не меняется)
-    PRIOR = SCALE_PRIOR
-    H2, rhs2 = H.copy(), rhs.copy()
-    for i in range(m if SCALE_PRIOR > 0 else 0):
-        a, b = p[4 * i], p[4 * i + 1]
-        s = max(float(np.hypot(a, b)), 1e-6)
-        for col, target in ((4 * i, a / s), (4 * i + 1, b / s)):
-            H2[col, col] += PRIOR
-            rhs2[col] += PRIOR * target
-    p = np.linalg.solve(H2, rhs2)
+        used.append((ids, J, J.T @ J))
+    wts = np.ones(len(used))
+    for it in range(max(1, IRLS_ITERS)):
+        H = np.zeros((4 * m, 4 * m))
+        rhs = np.zeros(4 * m)
+        for (ids, J, JTJ), we in zip(used, wts):
+            H[np.ix_(ids, ids)] += we * JTJ
+        W = 1e6                                  # первый кадр закреплён
+        H[:4, :4] += W * np.eye(4)
+        rhs[:4] += W * np.array([1.0, 0, 0, 0])
+        p = np.linalg.solve(H, rhs)
+        # второй проход: мягко возвращаем масштаб кадров к 1
+        H2, rhs2 = H.copy(), rhs.copy()
+        for i in range(m if SCALE_PRIOR > 0 else 0):
+            a, b = p[4 * i], p[4 * i + 1]
+            s = max(float(np.hypot(a, b)), 1e-6)
+            for col, target in ((4 * i, a / s), (4 * i + 1, b / s)):
+                H2[col, col] += SCALE_PRIOR
+                rhs2[col] += SCALE_PRIOR * target
+        p = np.linalg.solve(H2, rhs2)
+        if it == IRLS_ITERS - 1 or IRLS_ITERS <= 1:
+            break
+        er = np.array([np.sqrt(np.mean(((J @ p[ids]).reshape(-1, 2) ** 2).sum(1)))
+                       for ids, J, _ in used])
+        wts = 1.0 / (1.0 + (er / IRLS_C) ** 2)      # чем больше невязка, тем меньше вес
     sq, cnt = 0.0, 0
-    for ids, J in used:
+    for ids, J, _ in used:
         r = J @ p[ids]
         sq += float((r ** 2).sum())
         cnt += len(r)
@@ -154,22 +187,121 @@ def solve(nodes, edges, size):
                                [b, a, ty - (b * cx + a * cy)]]))
     return poses, rms
 
-def weight_map(h, w, L):
+
+def _rot(th):
+    c, s = np.cos(th), np.sin(th)
+    return np.array([[c, -s], [s, c]])
+
+
+def solve_rigid(nodes, edges, size):
+    """Положение кадров только с поворотом и сдвигом: масштаб строго 1, поэтому карта не может схлопнуться.
+    Начальное приближение берём по цепочке связей, затем уточняем общей подгонкой (Гаусс-Ньютон) с IRLS."""
+    pos = {n: i for i, n in enumerate(nodes)}
+    m = len(nodes)
+    cx, cy = size[0] / 2, size[1] / 2
+    rng = np.random.default_rng(0)
+    E = []
+    for j, k, A, B in edges:
+        if j not in pos or k not in pos:
+            continue
+        if len(A) > MAX_PTS:
+            sel = rng.choice(len(A), MAX_PTS, replace=False)
+            A, B = A[sel], B[sel]
+        E.append((pos[j], pos[k], A.astype(np.float64) - (cx, cy), B.astype(np.float64) - (cx, cy)))
+
+    # --- начальное приближение: идём по связям от первого кадра ---
+    theta, t = np.zeros(m), np.zeros((m, 2))
+    known = np.zeros(m, bool)
+    known[0] = True
+    rel, adj = [], [[] for _ in range(m)]
+    for e, (p, q, u, v) in enumerate(E):
+        a0, b0 = u - u.mean(0), v - v.mean(0)
+        phi = float(np.angle(np.sum((b0[:, 0] - 1j * b0[:, 1]) * (a0[:, 0] + 1j * a0[:, 1]))))
+        rel.append((phi, u.mean(0) - _rot(phi) @ v.mean(0)))
+        adj[p].append((q, e, True))
+        adj[q].append((p, e, False))
+    queue = [0]
+    while queue:
+        i = queue.pop(0)
+        for o, e, fwd in adj[i]:
+            if known[o]:
+                continue
+            phi, c = rel[e]
+            if fwd:
+                theta[o] = theta[i] + phi
+                t[o] = _rot(theta[i]) @ c + t[i]
+            else:
+                theta[o] = theta[i] - phi
+                t[o] = t[i] - _rot(theta[o]) @ c
+            known[o] = True
+            queue.append(o)
+
+    # --- общая подгонка ---
+    w = np.ones(len(E))
+    for outer in range(max(1, IRLS_ITERS)):
+        for _ in range(GN_ITERS if outer == 0 else 2):
+            H = np.zeros((3 * m, 3 * m))
+            g = np.zeros(3 * m)
+            for e, (p, q, u, v) in enumerate(E):
+                Pu = u @ _rot(theta[p]).T
+                Qv = v @ _rot(theta[q]).T
+                r = (Pu + t[p]) - (Qv + t[q])
+                J = np.zeros((2 * len(u), 6))
+                J[0::2, 0], J[1::2, 0] = -Pu[:, 1], Pu[:, 0]
+                J[0::2, 1], J[1::2, 2] = 1.0, 1.0
+                J[0::2, 3], J[1::2, 3] = Qv[:, 1], -Qv[:, 0]
+                J[0::2, 4], J[1::2, 5] = -1.0, -1.0
+                ids = np.r_[3 * p:3 * p + 3, 3 * q:3 * q + 3]
+                H[np.ix_(ids, ids)] += w[e] * (J.T @ J)
+                g[ids] += w[e] * (J.T @ r.reshape(-1))
+            H[:3, :3] += 1e6 * np.eye(3)               # первый кадр закреплён
+            H += 1e-6 * np.eye(3 * m)
+            d = np.linalg.solve(H, -g)
+            theta += d[0::3]
+            t[:, 0] += d[1::3]
+            t[:, 1] += d[2::3]
+        er, sq, cnt = [], 0.0, 0
+        for p, q, u, v in E:
+            r = (u @ _rot(theta[p]).T + t[p]) - (v @ _rot(theta[q]).T + t[q])
+            er.append(float(np.sqrt(np.mean((r ** 2).sum(1)))))
+            sq += float((r ** 2).sum())
+            cnt += r.size
+        if outer < IRLS_ITERS - 1:
+            w = 1.0 / (1.0 + (np.array(er) / IRLS_C) ** 2)
+    rms = (sq / max(cnt, 1)) ** 0.5
+    poses = []
+    for i in range(m):
+        a, b = np.cos(theta[i]), np.sin(theta[i])
+        poses.append(np.array([[a, -b, t[i, 0] - (a * cx - b * cy)],
+                               [b, a, t[i, 1] - (b * cx + a * cy)]]))
+    return poses, rms
+
+
+def solve(nodes, edges, size):
+    return (solve_rigid if SOLVER == "rigid" else solve_similarity)(nodes, edges, size)
+
+
+def weight_map(h, w, L, power=None, light=None):
+    power = DIST_POWER if power is None else power
+    light = LIGHT_POWER if light is None else light
     m = np.zeros((h, w), np.uint8)
     m[2:-2, 2:-2] = 255
     d = cv2.distanceTransform(m, cv2.DIST_L2, 3)
     d = d / d.max()
-    return (d ** DIST_POWER) * (L ** LIGHT_POWER)
+    return (d ** power) * (L ** light)
+
 
 # ---------- отбраковка связей, которые спорят с остальными ----------
 PRUNE_FACTOR = 2.5                         # выбрасываем, если невязка в столько раз больше медианной
 PRUNE_MIN_PX = 5.0                         # ...и больше этого числа пикселей
+
 
 def edge_rms(e, poses, pos):
     j, k, A, B = e
     Mj, Mk = poses[pos[j]], poses[pos[k]]
     r = np.linalg.norm((A @ Mj[:, :2].T + Mj[:, 2]) - (B @ Mk[:, :2].T + Mk[:, 2]), axis=1)
     return float(np.sqrt(np.mean(r ** 2)))
+
 
 def prune_links(best, edges, size, rounds=3):
     """Убираем связи, которые сильно не согласуются с остальными (но не рвём цепочку)."""
@@ -196,6 +328,8 @@ def prune_links(best, edges, size, rounds=3):
         removed += len(drop)
     print(f"Отбраковано связей: {removed} (осталось {len(edges)})")
     return edges
+
+
 def render(paths, poses):
     h, w = load(paths[0]).shape[:2]
     corners = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
@@ -211,9 +345,15 @@ def render(paths, poses):
     L = np.maximum(L / L.max(), 0.05)
     gain = np.clip(L.mean() / L, 0.6, 2.5) if FLAT_FIELD else np.ones_like(L)
     wmap = weight_map(h, w, L).astype(np.float32)
+    two = BLEND == "two_band"
+    if two:
+        wlow = weight_map(h, w, L, LOW_POWER, 0.0).astype(np.float32)   # мягкие веса для света
 
     acc = np.zeros((Hc, Wc, 3), np.float32)
     wsum = np.zeros((Hc, Wc), np.float32)
+    if two:
+        acc_l = np.zeros((Hc, Wc, 3), np.float32)
+        wsum_l = np.zeros((Hc, Wc), np.float32)
     for p, M in zip(paths, poses):
         Mc = np.zeros((2, 3))
         Mc[:, :2] = sc * M[:, :2]
@@ -226,15 +366,27 @@ def render(paths, poses):
         Ml = Mc.copy()
         Ml[0, 2] -= x0
         Ml[1, 2] -= y0
+        out_size = (x1 - x0, y1 - y0)
         img = load(p).astype(np.float32) * gain[..., None]
-        wi = cv2.warpAffine(img, Ml, (x1 - x0, y1 - y0), flags=cv2.INTER_LINEAR)
-        ww = cv2.warpAffine(wmap, Ml, (x1 - x0, y1 - y0), flags=cv2.INTER_LINEAR)
+        ww = cv2.warpAffine(wmap, Ml, out_size, flags=cv2.INTER_LINEAR)
+        if two:
+            low = cv2.GaussianBlur(img, (0, 0), LOW_SIGMA)               # плавный свет
+            wi = cv2.warpAffine(img - low, Ml, out_size, flags=cv2.INTER_LINEAR)   # мелкие детали
+            li = cv2.warpAffine(low, Ml, out_size, flags=cv2.INTER_LINEAR)
+            wl = cv2.warpAffine(wlow, Ml, out_size, flags=cv2.INTER_LINEAR)
+            acc_l[y0:y1, x0:x1] += li * wl[..., None]
+            wsum_l[y0:y1, x0:x1] += wl
+        else:
+            wi = cv2.warpAffine(img, Ml, out_size, flags=cv2.INTER_LINEAR)
         acc[y0:y1, x0:x1] += wi * ww[..., None]
         wsum[y0:y1, x0:x1] += ww
     valid = wsum > 1e-3
     mosaic = acc / np.maximum(wsum, 1e-6)[..., None]
+    if two:
+        mosaic = mosaic + acc_l / np.maximum(wsum_l, 1e-6)[..., None]
     mosaic[~valid] = 0
     return np.clip(mosaic, 0, 255).astype(np.uint8), valid
+
 
 def save_map(mosaic, valid, name, meta):
     bgra = cv2.cvtColor(mosaic, cv2.COLOR_BGR2BGRA)
@@ -246,19 +398,23 @@ def save_map(mosaic, valid, name, meta):
     with open(os.path.join(OUT, name + ".json"), "w", encoding="utf-8") as f:
         json.dump(info, f, ensure_ascii=False, indent=2)
 
+
 # ---------- проверка связей (для тестировщика) ----------
-CHECK_AT = 5200                            # номер кадра, около которого цепочка раньше рвалась
+CHECK_AT = 2000                            # около этого кадра смотрим связи (6 неплохих мест: 1955->2061)
+
 
 def draw_link(path_a, path_b, A, B, out_path):
     """Картинка: два кадра рядом и линии между совпавшими точками."""
     ia, ib = load(path_a), load(path_b)
     canvas = np.hstack([ia, ib])
     off = ia.shape[1]
-    for (x1, y1), (x2, y2) in list(zip(A, B))[:60]:
+    idx = np.linspace(0, len(A) - 1, min(len(A), 60)).astype(int)     # равномерно по всем точкам, не первые 60
+    for (x1, y1), (x2, y2) in zip(A[idx], B[idx]):
         cv2.line(canvas, (int(x1), int(y1)), (int(x2) + off, int(y2)), (0, 255, 0), 1)
         cv2.circle(canvas, (int(x1), int(y1)), 3, (0, 0, 255), -1)
         cv2.circle(canvas, (int(x2) + off, int(y2)), 3, (0, 0, 255), -1)
     cv2.imwrite(out_path, canvas)
+
 
 def diagnose(best, edges, poses, kpaths, top=6):
     pos = {n: i for i, n in enumerate(best)}
@@ -274,14 +430,22 @@ def diagnose(best, edges, poses, kpaths, top=6):
     print("Самые слабые связи (мало совпадений):")
     for rms, n, a, b, *_ in sorted(rows, key=lambda x: x[1])[:top]:
         print(f"  кадры {a} -> {b}: совпадений {n}, невязка {rms:.1f} px")
+
     print("Самые большие невязки:")
-    for rms, n, a, b, *_ in sorted(rows, key=lambda x: -x[0])[:top]:
+    worst = sorted(rows, key=lambda x: -x[0])[:top]
+    for rms, n, a, b, j, k, A, B in worst:
         print(f"  кадры {a} -> {b}: совпадений {n}, невязка {rms:.1f} px")
+    for rms, n, a, b, j, k, A, B in worst[:3]:                  # картинки для 3 худших связей
+        draw_link(kpaths[j], kpaths[k], A, B, os.path.join(OUT, f"link_{a}_{b}.png"))
+        print(f"  картинка: link_{a}_{b}.png")
+
     span = [r for r in rows if r[2] < CHECK_AT <= r[3]]
     print(f"Связи, перекрывающие кадр {CHECK_AT}: {len(span)} шт.")
     for rms, n, a, b, j, k, A, B in sorted(span, key=lambda x: x[1])[:3]:
         print(f"  кадры {a} -> {b}: совпадений {n}, невязка {rms:.1f} px  (картинка link_{a}_{b}.png)")
         draw_link(kpaths[j], kpaths[k], A, B, os.path.join(OUT, f"link_{a}_{b}.png"))
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     allp = []
@@ -322,6 +486,12 @@ def main():
         poses, rms = solve(best, cedges, size)
         print(f"Кусок {part}: ключевых кадров {len(best)}, "
               f"кадры №{fnum(kpaths[best[0]])}-{fnum(kpaths[best[-1]])}, невязка {rms:.2f} px")
+        posd = {n: i for i, n in enumerate(best)}
+        er = [edge_rms(e, poses, posd) for e in cedges]
+        print(f"  Невязка по связям: медиана {np.median(er):.2f} px, 90% связей ниже {np.percentile(er, 90):.2f} px, "
+              f"больше {PRUNE_MIN_PX:.0f} px: {sum(x > PRUNE_MIN_PX for x in er)} из {len(er)}")
+        sc_all = [float(np.hypot(M[0, 0], M[1, 0])) for M in poses]
+        print(f"  Масштаб кадров: от {min(sc_all):.2f} до {max(sc_all):.2f} (первый = 1.00)")
         mosaic, valid = render([kpaths[i] for i in best], poses)
         name = f"orb_s{START}_part{part}_n{len(best)}"
         save_map(mosaic, valid, name, {"source": "ORB + общая подгонка", "keyframes_used": len(best),
@@ -333,6 +503,7 @@ def main():
         results.append((best, poses))
     print(f"Готово за {time.time() - t0:.0f} с.")
     return keys, results
+
 
 if __name__ == "__main__":
     main()
