@@ -15,14 +15,13 @@ WIDTH = 480                                # рабочая ширина кад�
 MIN_SHIFT = 0.15                           # новый кадр берём, когда сдвиг >= 20% меньшей стороны
 CHECK_EVERY = 2                            # проверять каждый 2-й кадр
 NEIGHBORS = 5                              # с сколькими прошлыми ключевыми кадрами сопоставлять
-MIN_INLIERS = 10                           # минимум надёжных совпадений для связи
+MIN_INLIERS = 25                           # минимум надёжных совпадений для связи
 MAX_SIDE = 4000                            # максимальный размер карты в пикселях
 LIGHT_POWER = 2.0                          # насколько сильно тёмные края теряют вес при смешивании
-DIST_POWER = 6.0                           # чем больше, тем меньше двоения (побеждает кадр, где точка ближе к центру)
+DIST_POWER = 24.0                           # чем больше, тем меньше двоения (побеждает кадр, где точка ближе к центру)
 MAX_PARTS = 3                              # сколько самых больших кусков сохранять
 FLAT_FIELD = True                          # выравнивание света
 SCALE_PRIOR = 1e5                          # держать масштаб кадров близким к 1 (0 = выключить если срочно :D высота аппарата сильно меняется)
-
 
 def natural_key(s):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
@@ -37,11 +36,9 @@ def load(path):
     k = WIDTH / img.shape[1]
     return cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
 
-
 def hp_gray(img):
     g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
     return g - cv2.GaussianBlur(g, (0, 0), 15)          # убираем плавный свет
-
 
 # отбор кадров (New??????) надо как-то отдельно создать функцию в отедльном файле???? для скорости
 def select_keyframes(paths):
@@ -58,19 +55,19 @@ def select_keyframes(paths):
             last, since = cur, 0
     return keep
 
-
 # зацепки ORB и связи между кадрами (New!!)
 clahe = cv2.createCLAHE(2.0, (8, 8))
 orb = cv2.ORB_create(4000, fastThreshold=5)
 bf = cv2.BFMatcher(cv2.NORM_HAMMING)
 
-
-def features(img):
-    g = clahe.apply(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+def features(img, k=12, gain=25):
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    mean = cv2.GaussianBlur(g, (0, 0), k)                                   # плавный фон (муть)
+    std = np.sqrt(cv2.GaussianBlur((g - mean) ** 2, (0, 0), k)) + 2         # местный контраст
+    g = np.clip(128 + gain * (g - mean) / std, 0, 255).astype(np.uint8)     # выравниваем контраст
     kp, des = orb.detectAndCompute(g, None)
-    pts = np.float32([k.pt for k in kp]) if kp else np.zeros((0, 2), np.float32)
+    pts = np.float32([x.pt for x in kp]) if kp else np.zeros((0, 2), np.float32)
     return pts, des
-
 
 def match(fa, fb):
     (pa, da), (pb, db) = fa, fb
@@ -90,7 +87,6 @@ def match(fa, fb):
         return None
     return A[inl], B[inl]
 
-
 def components(n, edges):
     parent = list(range(n))
 
@@ -105,7 +101,6 @@ def components(n, edges):
     for i in range(n):
         groups.setdefault(find(i), []).append(i)
     return sorted(groups.values(), key=len, reverse=True)
-
 
 def solve(nodes, edges, size):
     """Подбираем положение каждого кадра (поворот, масштаб, сдвиг) так,
@@ -166,7 +161,41 @@ def weight_map(h, w, L):
     d = d / d.max()
     return (d ** DIST_POWER) * (L ** LIGHT_POWER)
 
+# ---------- отбраковка связей, которые спорят с остальными ----------
+PRUNE_FACTOR = 2.5                         # выбрасываем, если невязка в столько раз больше медианной
+PRUNE_MIN_PX = 5.0                         # ...и больше этого числа пикселей
 
+def edge_rms(e, poses, pos):
+    j, k, A, B = e
+    Mj, Mk = poses[pos[j]], poses[pos[k]]
+    r = np.linalg.norm((A @ Mj[:, :2].T + Mj[:, 2]) - (B @ Mk[:, :2].T + Mk[:, 2]), axis=1)
+    return float(np.sqrt(np.mean(r ** 2)))
+
+def prune_links(best, edges, size, rounds=3):
+    """Убираем связи, которые сильно не согласуются с остальными (но не рвём цепочку)."""
+    bset = set(best)
+    edges = [e for e in edges if e[0] in bset and e[1] in bset]
+    pos = {n: i for i, n in enumerate(best)}
+    removed = 0
+    for _ in range(rounds):
+        poses, rms = solve(best, edges, size)
+        er = [edge_rms(e, poses, pos) for e in edges]
+        limit = max(PRUNE_MIN_PX, PRUNE_FACTOR * float(np.median(er)))
+        order = sorted(range(len(edges)), key=lambda i: -er[i])
+        drop = set()
+        for i in order:
+            if er[i] <= limit:
+                break
+            rest = [e for t, e in enumerate(edges) if t not in drop and t != i]
+            comp0 = components(max(best) + 1, rest)[0]
+            if bset <= set(comp0):
+                drop.add(i)                                      # связность сохраняется
+        if not drop:
+            break
+        edges = [e for t, e in enumerate(edges) if t not in drop]
+        removed += len(drop)
+    print(f"Отбраковано связей: {removed} (осталось {len(edges)})")
+    return edges
 def render(paths, poses):
     h, w = load(paths[0]).shape[:2]
     corners = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
@@ -207,7 +236,6 @@ def render(paths, poses):
     mosaic[~valid] = 0
     return np.clip(mosaic, 0, 255).astype(np.uint8), valid
 
-
 def save_map(mosaic, valid, name, meta):
     bgra = cv2.cvtColor(mosaic, cv2.COLOR_BGR2BGRA)
     bgra[:, :, 3] = valid.astype(np.uint8) * 255
@@ -218,7 +246,42 @@ def save_map(mosaic, valid, name, meta):
     with open(os.path.join(OUT, name + ".json"), "w", encoding="utf-8") as f:
         json.dump(info, f, ensure_ascii=False, indent=2)
 
+# ---------- проверка связей (для тестировщика) ----------
+CHECK_AT = 5200                            # номер кадра, около которого цепочка раньше рвалась
 
+def draw_link(path_a, path_b, A, B, out_path):
+    """Картинка: два кадра рядом и линии между совпавшими точками."""
+    ia, ib = load(path_a), load(path_b)
+    canvas = np.hstack([ia, ib])
+    off = ia.shape[1]
+    for (x1, y1), (x2, y2) in list(zip(A, B))[:60]:
+        cv2.line(canvas, (int(x1), int(y1)), (int(x2) + off, int(y2)), (0, 255, 0), 1)
+        cv2.circle(canvas, (int(x1), int(y1)), 3, (0, 0, 255), -1)
+        cv2.circle(canvas, (int(x2) + off, int(y2)), 3, (0, 0, 255), -1)
+    cv2.imwrite(out_path, canvas)
+
+def diagnose(best, edges, poses, kpaths, top=6):
+    pos = {n: i for i, n in enumerate(best)}
+    rows = []
+    for j, k, A, B in edges:
+        if j not in pos or k not in pos:
+            continue
+        Mj, Mk = poses[pos[j]], poses[pos[k]]
+        gj = A @ Mj[:, :2].T + Mj[:, 2]
+        gk = B @ Mk[:, :2].T + Mk[:, 2]
+        r = np.linalg.norm(gj - gk, axis=1)
+        rows.append((float(np.sqrt(np.mean(r ** 2))), len(A), fnum(kpaths[j]), fnum(kpaths[k]), j, k, A, B))
+    print("Самые слабые связи (мало совпадений):")
+    for rms, n, a, b, *_ in sorted(rows, key=lambda x: x[1])[:top]:
+        print(f"  кадры {a} -> {b}: совпадений {n}, невязка {rms:.1f} px")
+    print("Самые большие невязки:")
+    for rms, n, a, b, *_ in sorted(rows, key=lambda x: -x[0])[:top]:
+        print(f"  кадры {a} -> {b}: совпадений {n}, невязка {rms:.1f} px")
+    span = [r for r in rows if r[2] < CHECK_AT <= r[3]]
+    print(f"Связи, перекрывающие кадр {CHECK_AT}: {len(span)} шт.")
+    for rms, n, a, b, j, k, A, B in sorted(span, key=lambda x: x[1])[:3]:
+        print(f"  кадры {a} -> {b}: совпадений {n}, невязка {rms:.1f} px  (картинка link_{a}_{b}.png)")
+        draw_link(kpaths[j], kpaths[k], A, B, os.path.join(OUT, f"link_{a}_{b}.png"))
 def main():
     os.makedirs(OUT, exist_ok=True)
     allp = []
@@ -255,7 +318,8 @@ def main():
         if len(comp) < 5:
             break
         best = sorted(comp)
-        poses, rms = solve(best, edges, size)
+        cedges = prune_links(best, edges, size)
+        poses, rms = solve(best, cedges, size)
         print(f"Кусок {part}: ключевых кадров {len(best)}, "
               f"кадры №{fnum(kpaths[best[0]])}-{fnum(kpaths[best[-1]])}, невязка {rms:.2f} px")
         mosaic, valid = render([kpaths[i] for i in best], poses)
@@ -264,10 +328,11 @@ def main():
                                        "first_frame": fnum(kpaths[best[0]]), "last_frame": fnum(kpaths[best[-1]]),
                                        "frames_total": len(allp), "rms_px": round(rms, 3)})
         print(f"  Файл: {name}.png, размер {mosaic.shape[1]}x{mosaic.shape[0]}")
+        if part == 0:
+            diagnose(best, cedges, poses, kpaths)
         results.append((best, poses))
     print(f"Готово за {time.time() - t0:.0f} с.")
     return keys, results
-
 
 if __name__ == "__main__":
     main()

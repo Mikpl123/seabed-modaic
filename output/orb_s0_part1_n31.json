@@ -1,0 +1,14 @@
+{
+  "file": "orb_s0_part1_n31.png",
+  "width": 716,
+  "height": 784,
+  "crs": null,
+  "bounds": null,
+  "meters_per_pixel": null,
+  "source": "ORB + общая подгонка",
+  "keyframes_used": 31,
+  "first_frame": 5375,
+  "last_frame": 6325,
+  "frames_total": 6334,
+  "rms_px": 1.866
+}
