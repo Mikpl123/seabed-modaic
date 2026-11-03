@@ -1,0 +1,27 @@
+{
+  "file": "orb_s0_part0_n121.png",
+  "width": 2100,
+  "height": 3355,
+  "crs": null,
+  "units": "px (масштаб неизвестен)",
+  "meters_per_pixel": null,
+  "origin_top_left": [
+    0.0,
+    0.0
+  ],
+  "bounds": [
+    0.0,
+    -3355.0,
+    2100.0,
+    0.0
+  ],
+  "source": "ORB + общая подгонка",
+  "keyframes_used": 121,
+  "first_frame": 493,
+  "last_frame": 3351,
+  "frames_total": 3385,
+  "rms_px": 1.767,
+  "render_width": 960,
+  "refined": true,
+  "geotiff": "orb_s0_part0_n121.tif"
+}

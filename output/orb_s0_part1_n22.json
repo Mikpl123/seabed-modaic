@@ -1,0 +1,27 @@
+{
+  "file": "orb_s0_part1_n22.png",
+  "width": 1890,
+  "height": 1548,
+  "crs": null,
+  "units": "px (масштаб неизвестен)",
+  "meters_per_pixel": null,
+  "origin_top_left": [
+    0.0,
+    0.0
+  ],
+  "bounds": [
+    0.0,
+    -1548.0,
+    1890.0,
+    0.0
+  ],
+  "source": "ORB + общая подгонка",
+  "keyframes_used": 22,
+  "first_frame": 0,
+  "last_frame": 331,
+  "frames_total": 3385,
+  "rms_px": 4.643,
+  "render_width": 960,
+  "refined": true,
+  "geotiff": "orb_s0_part1_n22.tif"
+}
