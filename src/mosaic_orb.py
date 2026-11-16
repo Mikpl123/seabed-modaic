@@ -26,17 +26,29 @@ LOOP_SAMPLE = 20                           # сшивка кусков: скол
 LOOP_MIN_INLIERS = 40                      # сшивка кусков: минимум совпадений (строже, чем MIN_INLIERS)
 LOOP_STRONG = 120                          # сшивка кусков: одна связь принимается без подтверждения, если совпадений не меньше
 
+# ---------- пересечения трассы (crossover) ----------
+CROSS_ENABLE = True                        # False = выключить (для сравнения "с" и "без")
+CROSS_MIN_GAP = 12                         # «пересечение»: номера ключевых кадров различаются больше чем на это
+CROSS_MAX_DIST = 0.8                       # центры кадров ближе этой доли меньшей стороны кадра
+CROSS_MIN_INLIERS = 40                     # строже, чем MIN_INLIERS
+CROSS_MAX_DRIFT = 40.0                     # макс. сдвиг кадра этой связью относительно текущего положения, px рабочего размера
+CROSS_ROUNDS = 2
+CROSS_MAX_PAIRS = 300
+
+# ---------- отладка ----------
+DEBUG_LABELS = True                        # сохранять debug_labels.png: карта раскрашена по кадрам-источникам
+
 # ---------- сборка карты ----------
 RENDER_WIDTH = 960                         # ширина кадров при сборке (не больше исходной): больше = чётче, но дольше
 MAX_SIDE = 4000                            # максимальный размер карты в пикселях
-TILE_SIZE = 1024                            # размер блока финальной сборки (меньше = меньше пиковая память)
-CACHE_SIZE = 24                              # сколько уменьшенных кадров держать в кеше
+TILE_SIZE = 1024                           # размер блока финальной сборки (меньше = меньше пиковая память)
+CACHE_SIZE = 24                            # сколько уменьшенных кадров держать в кеше
 REFINE = True                              # уточнять положение кадров по изображению (убирает двоение камней и рыб)
 REFINE_SIDE = 3000                         # размер рабочей карты уточнения, px
 REFINE_MIN_CC = 0.30                       # минимальная корреляция, чтобы принять уточнение кадра
 REFINE_MAX_SHIFT = 40.0                    # максимальный сдвиг кадра при уточнении, px (рабочего размера)
 REFINE_MIN_OVERLAP = 0.10                  # минимальная доля перекрытия с уже собранным, чтобы уточнять кадр
-SELECT_MIN = 0.30                          # пиксель заполнен, если лучший кадр лежит на нём не ближе этой доли к краю (0..1)
+SELECT_MIN = 0.05                          # пиксель заполнен, если лучший кадр лежит на нём не ближе этой доли к краю (0..1)
 SEAM_SCALE = 0.5                           # масштаб, на котором ищем швы (меньше = быстрее и меньше памяти)
 FEATHER = 4.0                              # ширина размытия шва для мелких деталей, px (мало = нет двоения)
 FEATHER_LOW = 25.0                         # ширина смешивания плавного света на шве, px (больше = плавнее переходы яркости)
@@ -54,11 +66,11 @@ CLARITY = 0.2                              # локальный контраст
 SHARPEN = 0.35                             # резкость мелких деталей (0 = выключить)
 
 # ---------- flat-field correction: выравнивание неравномерного освещения ----------
-FLAT_FIELD = True                            # включить коррекцию плавного виньетирования/пятен света
-FLAT_SIGMA = 80.0                           # радиус оценки освещения в пикселях готовой карты
-FLAT_STRENGTH = 0.55                         # 0..1: сила коррекции (начать примерно с 0.3-0.5)
-FLAT_GAIN_MIN = 0.70                           # ограничение снизу: не затемнять сильно
-FLAT_GAIN_MAX = 1.60                           # ограничение сверху: не вытягивать шум слишком сильно
+FLAT_FIELD = True                          # включить коррекцию плавного виньетирования/пятен света
+FLAT_SIGMA = 80.0                          # радиус оценки освещения в пикселях готовой карты
+FLAT_STRENGTH = 0.55                       # 0..1: сила коррекции
+FLAT_GAIN_MIN = 0.70                       # ограничение снизу: не затемнять сильно
+FLAT_GAIN_MAX = 1.60                       # ограничение сверху: не вытягивать шум слишком сильно
 
 # ---------- GeoTIFF ----------
 GEO_EPSG = None                            # код проекции в метрах, напр. 32755 (UTM 55S). None = локальные координаты
@@ -325,6 +337,49 @@ def prune_links(best, edges, size, rounds=3):
     return edges
 
 
+# ---------- пересечения трассы: кадры далёкие по времени, но близкие на карте ----------
+def add_crossovers(best, edges, poses, feats, size):
+    """Ищем пары кадров, далёких по номеру, но перекрывающихся на карте (аппарат прошёл второй раз),
+    сопоставляем их и добавляем связь, только если она согласуется с текущими положениями."""
+    cx, cy = size[0] / 2, size[1] / 2
+    pos = {n: i for i, n in enumerate(best)}
+    cen = {n: _apply(poses[pos[n]], np.array([[cx, cy]]))[0] for n in best}
+    linked = {(min(j, k), max(j, k)) for j, k, _, _ in edges}
+    lim = CROSS_MAX_DIST * min(size)
+    cands = []
+    for a in range(len(best)):
+        for b in range(a + 1, len(best)):
+            j, k = best[a], best[b]
+            if k - j <= CROSS_MIN_GAP or (j, k) in linked:
+                continue
+            d = float(np.linalg.norm(cen[j] - cen[k]))
+            if d < lim:
+                cands.append((d, j, k))
+    cands.sort()
+    cands = cands[:CROSS_MAX_PAIRS]
+    new, n_match, bad = [], 0, 0
+    for d, j, k in cands:
+        r = match(feats[j], feats[k], CROSS_MIN_INLIERS)
+        if r is None:
+            continue
+        n_match += 1
+        gA = _apply(poses[pos[j]], r[0])
+        gB = _apply(poses[pos[k]], r[1])
+        s = similarity(gB, gA)                      # поправка, которой связь «двигает» кадр k
+        if s is None:
+            bad += 1
+            continue
+        z, c = s
+        ck = cen[k][0] + 1j * cen[k][1]
+        drift = abs(z * ck + c - ck)
+        if 0.8 < abs(z) < 1.25 and abs(np.angle(z)) < 0.35 and drift < CROSS_MAX_DRIFT:
+            new.append((j, k, r[0], r[1]))
+        else:
+            bad += 1
+    print(f"  Пересечения: кандидатов {len(cands)}, совпали {n_match}, отклонено по согласованности {bad}, принято {len(new)}")
+    return edges + new, len(new)
+
+
 def illumination(paths, ld):
     """Карта света по выборке кадров: L (яркость), gain (поправка на виньетирование), C (средний уровень кадров)."""
     idx = np.linspace(0, len(paths) - 1, min(60, len(paths))).astype(int)
@@ -457,7 +512,7 @@ def refine_poses(paths, poses):
     return out, stat
 
 
-def render(paths, poses, edges=None, width=None):
+def render(paths, poses, edges=None, width=None, tag="map"):
     """Сборка карты. Положения poses заданы для кадров шириной WIDTH, а картинку берём из кадров шириной width
     (чётче). На каждом пикселе берём ОДИН кадр: швы ищем там, где соседние кадры лучше всего совпадают (в обход
     камней и рыб), поэтому объекты не двоятся. Свет на шве смешиваем широко, детали узко."""
@@ -505,7 +560,8 @@ def render(paths, poses, edges=None, width=None):
     m0 = np.zeros((h, w), np.uint8)
     m0[2:-2, 2:-2] = 255
     d = cv2.distanceTransform(m0, cv2.DIST_L2, 3)
-    score = ((d / d.max()) * L).astype(np.float32)         # лучшее место кадра: центр и не тёмный угол
+    ok = L > (L.mean() / 2.0)                              # убираем только по-настоящему тёмные углы кадра
+    score = ((d / d.max()) * ok).astype(np.float32)        # лучшее место кадра: центр и не тёмный угол
     cover = (m0 > 0).astype(np.float32)
     boxes = [place(M, crn, sc, Wc, Hc, minx, miny) for M in poses_r]
 
@@ -557,19 +613,23 @@ def render(paths, poses, edges=None, width=None):
         label[best <= SELECT_MIN] = -1
     valid = label >= 0
 
-    # Финальная сборка по блокам: не держим сразу четыре полноразмерных float32-массива.
-    # label и итоговые uint8/valid остаются глобальными, но временные накопители ограничены TILE_SIZE.
-    valid = label >= 0
+    if DEBUG_LABELS:                                       # карта, раскрашенная по кадрам-источникам
+        pal = np.random.default_rng(1).integers(40, 255, (len(paths) + 1, 3), dtype=np.uint8)
+        dbg = pal[label]
+        dbg[label < 0] = 255
+        cv2.imwrite(os.path.join(OUT, f"debug_labels_{tag}.png"), dbg)
+        del dbg
+
+    # Финальная сборка по блокам: временные накопители ограничены TILE_SIZE.
     mosaic = np.zeros((Hc, Wc, 3), np.uint8)
     tile = max(256, int(TILE_SIZE))
     print(f"  Тайловая сборка: блок {tile}x{tile}")
 
-    # Подготовленные кадры кешируются только на время render; глобальный LRU load() также помогает
-    # повторным чтениям между этапами программы.
     prep_cache = {}
+
     def prep_cached(p, idx):
         if idx not in prep_cache:
-            prep_cache[idx] = (ld(p).astype(np.float32) * gain[..., None] * expo[idx]).astype(np.float32)
+            prep_cache[idx] = prep(p, idx)
         return prep_cache[idx]
 
     for ty in range(0, Hc, tile):
@@ -590,12 +650,9 @@ def render(paths, poses, edges=None, width=None):
                 iy0, iy1 = max(y0, yb), min(y1, ye)
                 if ix1 <= ix0 or iy1 <= iy0:
                     continue
-                # Кадр не выбран для этого участка — не тратим время на warp.
-                sel_full = (label[iy0:iy1, ix0:ix1] == idx).astype(np.float32)
-                if not sel_full.any():
-                    continue
+                if not (label[iy0:iy1, ix0:ix1] == idx).any():
+                    continue                               # кадр не выбран для этого участка
 
-                # Mc = глобальное преобразование кадра; переводим его в координаты текущего тайла.
                 out_size = (tw, th)
                 Mtile = Ml.copy()
                 Mtile[0, 2] += x0 - xb
@@ -605,7 +662,6 @@ def render(paths, poses, edges=None, width=None):
                 hi_w = cv2.warpAffine(img - low, Mtile, out_size, flags=cv2.INTER_CUBIC)
                 lo_w = cv2.warpAffine(low, Mtile, out_size, flags=cv2.INTER_LINEAR)
 
-                # Метка шва уже находится в координатах итоговой карты.
                 sel = (label[yb:ye, xb:xe] == idx).astype(np.float32)
                 cov = cv2.warpAffine(cover, Mtile, out_size, flags=cv2.INTER_LINEAR) > 0.999
                 wh = (cv2.GaussianBlur(sel, (0, 0), FEATHER) if FEATHER > 0 else sel) * cov
@@ -638,29 +694,21 @@ def masked_blur(x, valid, sigma):
 
 
 def flat_field_correction(mosaic, valid, px=1.0):
-    """Исправляет плавную неравномерность освещения по яркости готовой мозаики.
-
-    Оценивает фон освещения большим masked Gaussian blur, затем применяет
-    ограниченную мультипликативную поправку. Детали дна сохраняются лучше,
-    чем при простом вычитании размытого фона. valid=True обозначает реальные
-    пиксели карты; пустые области не участвуют в оценке.
-    """
+    """Исправляет плавную неравномерность освещения по яркости готовой мозаики (масштабная поправка
+    по размытой карте света; пустые области в оценке не участвуют)."""
     if not valid.any() or FLAT_STRENGTH <= 0:
         return mosaic
 
     lab = cv2.cvtColor(mosaic, cv2.COLOR_BGR2LAB)
     L = lab[:, :, 0].astype(np.float32)
-    # Плавная карта освещения: исключаем пустые области из оценки.
     light = masked_blur(L, valid, FLAT_SIGMA * px)
     good = valid & np.isfinite(light) & (light > 1.0)
     if not good.any():
         return mosaic
 
-    # Целевой уровень света — среднее по заполненной области.
     target = float(np.median(light[good]))
     gain = target / np.maximum(light, 1.0)
     gain = np.clip(gain, FLAT_GAIN_MIN, FLAT_GAIN_MAX)
-    # Смешиваем исходный gain с единицей, чтобы регулировать силу эффекта.
     gain = 1.0 + FLAT_STRENGTH * (gain - 1.0)
     corrected = L * gain
     lab[:, :, 0] = np.clip(corrected, 0, 255).astype(np.uint8)
@@ -798,8 +846,6 @@ def save_map(mosaic, valid, name, meta, raw=None):
 
 
 # ---------- проверка связей (для тестировщика) ----------
-
-
 def draw_link(path_a, path_b, A, B, out_path):
     """Картинка: два кадра рядом и линии между совпавшими точками."""
     ia, ib = load(path_a), load(path_b)
@@ -883,6 +929,13 @@ def main():
         best = sorted(comp)
         cedges = prune_links(best, edges, size)
         poses, rms = solve(best, cedges, size)
+        if CROSS_ENABLE:
+            for _rnd in range(CROSS_ROUNDS):
+                cedges, n_new = add_crossovers(best, cedges, poses, feats, size)
+                if n_new == 0:
+                    break
+                poses, rms = solve(best, cedges, size)
+        poses_pre = poses                                  # положения ДО уточнения по изображению (для диагностики)
         print(f"Кусок {part}: ключевых кадров {len(best)}, "
               f"кадры №{fnum(kpaths[best[0]])}-{fnum(kpaths[best[-1]])}, невязка {rms:.2f} px")
         posd = {n: i for i, n in enumerate(best)}
@@ -891,6 +944,8 @@ def main():
               f"больше {PRUNE_MIN_PX:.0f} px: {sum(x > PRUNE_MIN_PX for x in er)} из {len(er)}")
         sc_all = [float(np.hypot(M[0, 0], M[1, 0])) for M in poses]
         print(f"  Масштаб кадров: от {min(sc_all):.2f} до {max(sc_all):.2f} (первый = 1.00)")
+        if part == 0:
+            diagnose(best, cedges, poses_pre, kpaths)      # невязки общего расчёта, а не после refine
         if REFINE:
             t2 = time.time()
             poses, st = refine_poses([kpaths[i] for i in best], poses)
@@ -903,7 +958,7 @@ def main():
         t1 = time.time()
         loc = {n: i for i, n in enumerate(best)}
         ledges = [(loc[j], loc[k], A, B) for j, k, A, B in cedges]
-        raw, valid, px = render([kpaths[i] for i in best], poses, ledges, width=rw)
+        raw, valid, px = render([kpaths[i] for i in best], poses, ledges, width=rw, tag=f"part{part}")
         # Сначала выравниваем плавный свет, затем выполняем обычное улучшение.
         flat = flat_field_correction(raw, valid, px) if FLAT_FIELD else raw
         mosaic = enhance(flat, valid, px) if ENHANCE else flat
@@ -912,11 +967,10 @@ def main():
         save_map(mosaic, valid, name, {"source": "ORB + общая подгонка", "keyframes_used": len(best),
                                        "first_frame": fnum(kpaths[best[0]]), "last_frame": fnum(kpaths[best[-1]]),
                                        "frames_total": len(allp), "rms_px": round(rms, 3),
-                                       "render_width": rw, "refined": bool(REFINE)},
+                                       "render_width": rw, "refined": bool(REFINE),
+                                       "crossovers": bool(CROSS_ENABLE)},
                  raw=raw if ENHANCE else None)
         print(f"  Файл: {name}.png, размер {mosaic.shape[1]}x{mosaic.shape[0]}")
-        if part == 0:
-            diagnose(best, cedges, poses, kpaths)
         results.append((best, poses))
     print(f"Готово за {time.time() - t0:.0f} с.")
     return keys, results

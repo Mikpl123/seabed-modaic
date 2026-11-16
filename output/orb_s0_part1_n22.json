@@ -23,5 +23,6 @@
   "rms_px": 4.643,
   "render_width": 960,
   "refined": true,
+  "crossovers": true,
   "geotiff": "orb_s0_part1_n22.tif"
 }
