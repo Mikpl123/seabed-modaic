@@ -26,14 +26,15 @@ LOOP_SAMPLE = 20                           # сшивка кусков: скол
 LOOP_MIN_INLIERS = 40                      # сшивка кусков: минимум совпадений (строже, чем MIN_INLIERS)
 LOOP_STRONG = 120                          # сшивка кусков: одна связь принимается без подтверждения, если совпадений не меньше
 
-# ---------- пересечения трассы (crossover) ----------
+# ---------- замыкание петель (аппарат вернулся на то же место) ----------
 CROSS_ENABLE = True                        # False = выключить (для сравнения "с" и "без")
-CROSS_MIN_GAP = 12                         # «пересечение»: номера ключевых кадров различаются больше чем на это
-CROSS_MAX_DIST = 0.8                       # центры кадров ближе этой доли меньшей стороны кадра
-CROSS_MIN_INLIERS = 40                     # строже, чем MIN_INLIERS
-CROSS_MAX_DRIFT = 40.0                     # макс. сдвиг кадра этой связью относительно текущего положения, px рабочего размера
-CROSS_ROUNDS = 2
-CROSS_MAX_PAIRS = 300
+CROSS_MIN_GAP = 12                         # пара кандидат, если номера ключевых кадров различаются больше чем на это
+CROSS_RETRIEVE_DESC = 1500                 # сколько дескрипторов брать для грубого поиска похожих кадров
+CROSS_TOP = 150                            # сколько лучших по виду пар проверять полным сопоставлением
+CROSS_MIN_INLIERS = 40                     # минимум совпадений для связи-петли (строже, чем MIN_INLIERS)
+CROSS_ACCEPT_RMS = 15.0                    # связь-петля остаётся, если после общего расчёта её невязка не больше, px рабочего размера
+LOOP_FILE = r"C:\Users\79211\Desktop\seabed-modaic\colmap\colmap_detected_loop_sequence_3.txt"                           # проверочный режим: путь к colmap_detected_loop_sequence_3.txt (кандидаты из COLMAP)
+LOOP_FILE_STEP = 20                        # номеров кадров на одну строку/столбец этого файла
 
 # ---------- отладка ----------
 DEBUG_LABELS = True                        # сохранять debug_labels.png: карта раскрашена по кадрам-источникам
@@ -46,7 +47,8 @@ CACHE_SIZE = 24                            # сколько уменьшенны
 REFINE = True                              # уточнять положение кадров по изображению (убирает двоение камней и рыб)
 REFINE_SIDE = 3000                         # размер рабочей карты уточнения, px
 REFINE_MIN_CC = 0.30                       # минимальная корреляция, чтобы принять уточнение кадра
-REFINE_MAX_SHIFT = 40.0                    # максимальный сдвиг кадра при уточнении, px (рабочего размера)
+REFINE_MAX_SHIFT = 20.0                    # максимальный сдвиг кадра при уточнении, px (рабочего размера)
+REFINE_CARRY = False                       # переносить сдвиг кадра на все следующие (накапливает ошибку и разрывает петли: оставь False)
 REFINE_MIN_OVERLAP = 0.10                  # минимальная доля перекрытия с уже собранным, чтобы уточнять кадр
 SELECT_MIN = 0.05                          # пиксель заполнен, если лучший кадр лежит на нём не ближе этой доли к краю (0..1)
 SEAM_SCALE = 0.5                           # масштаб, на котором ищем швы (меньше = быстрее и меньше памяти)
@@ -337,47 +339,93 @@ def prune_links(best, edges, size, rounds=3):
     return edges
 
 
-# ---------- пересечения трассы: кадры далёкие по времени, но близкие на карте ----------
-def add_crossovers(best, edges, poses, feats, size):
-    """Ищем пары кадров, далёких по номеру, но перекрывающихся на карте (аппарат прошёл второй раз),
-    сопоставляем их и добавляем связь, только если она согласуется с текущими положениями."""
-    cx, cy = size[0] / 2, size[1] / 2
-    pos = {n: i for i, n in enumerate(best)}
-    cen = {n: _apply(poses[pos[n]], np.array([[cx, cy]]))[0] for n in best}
-    linked = {(min(j, k), max(j, k)) for j, k, _, _ in edges}
-    lim = CROSS_MAX_DIST * min(size)
-    cands = []
-    for a in range(len(best)):
-        for b in range(a + 1, len(best)):
-            j, k = best[a], best[b]
+# ---------- замыкание петель ----------
+def retrieve_pairs(best, feats, linked):
+    """Грубый поиск кадров, похожих по виду, независимо от текущих положений (при дрейфе положения врут).
+    Считаем число совпавших дескрипторов на случайной выборке; лучшие пары потом проверяем полностью."""
+    rng = np.random.default_rng(0)
+    small = {}
+    for n in best:
+        d = feats[n][1]
+        if d is not None and len(d) >= 30:
+            small[n] = d[rng.choice(len(d), min(len(d), CROSS_RETRIEVE_DESC), replace=False)]
+    ns = sorted(small)
+    out = []
+    for a, j in enumerate(ns):
+        for k in ns[a + 1:]:
             if k - j <= CROSS_MIN_GAP or (j, k) in linked:
                 continue
-            d = float(np.linalg.norm(cen[j] - cen[k]))
-            if d < lim:
-                cands.append((d, j, k))
-    cands.sort()
-    cands = cands[:CROSS_MAX_PAIRS]
-    new, n_match, bad = [], 0, 0
-    for d, j, k in cands:
+            pr = bf.knnMatch(small[j], small[k], k=2)
+            sc = sum(1 for p in pr if len(p) == 2 and p[0].distance < RATIO * p[1].distance)
+            out.append((sc, j, k))
+    out.sort(reverse=True)
+    return [(j, k) for _, j, k in out[:CROSS_TOP]]
+
+
+def loop_file_pairs(best, frame_of, linked):
+    """Кандидаты из файла COLMAP (только для проверки): ячейка (i, j) = кадры i*STEP и j*STEP смотрят на одно место."""
+    try:
+        L = np.loadtxt(LOOP_FILE, delimiter=",")
+    except (ValueError, OSError) as e:
+        print(f"  LOOP_FILE не прочитан ({str(e)[:60]}): нужен файл с матрицей из 0 и 1 через запятую. Беру поиск по виду.")
+        return None
+    if L.ndim != 2 or L.shape[0] != L.shape[1]:
+        print("  LOOP_FILE не квадратная матрица. Беру поиск по виду.")
+        return None
+    fr = np.array([frame_of[n] for n in best])
+    pairs = set()
+    for i, j in zip(*np.where(np.triu(L, 25) > 0)):
+        a = best[int(np.argmin(np.abs(fr - i * LOOP_FILE_STEP)))]
+        b = best[int(np.argmin(np.abs(fr - j * LOOP_FILE_STEP)))]
+        a, b = min(a, b), max(a, b)
+        if b - a > CROSS_MIN_GAP and (a, b) not in linked:
+            pairs.add((a, b))
+    pairs = sorted(pairs)
+    if len(pairs) > CROSS_TOP:
+        pairs = [pairs[i] for i in np.linspace(0, len(pairs) - 1, CROSS_TOP).astype(int)]
+    return pairs
+
+
+def add_loops(best, edges, feats, size, frame_of):
+    """Добавляем связи между кадрами, далёкими по времени. Положения тут не используем: после дрейфа они неверны.
+    Каждую связь проверяет RANSAC (40+ совпадений, масштаб 0.7-1.4), потом общий расчёт: связи-петли, которые
+    не укладываются вместе с остальными, выбрасываем по одной (самую плохую первой)."""
+    linked = {(min(j, k), max(j, k)) for j, k, _, _ in edges}
+    if LOOP_FILE:
+        cand = loop_file_pairs(best, frame_of, linked)
+        if cand is not None:
+            print(f"  Петли: кандидатов из файла COLMAP {len(cand)}")
+    else:
+        cand = None
+    if cand is None:
+        cand = retrieve_pairs(best, feats, linked)
+        print(f"  Петли: кандидатов по внешнему виду {len(cand)}")
+    new = []
+    for j, k in cand:
         r = match(feats[j], feats[k], CROSS_MIN_INLIERS)
         if r is None:
             continue
-        n_match += 1
-        gA = _apply(poses[pos[j]], r[0])
-        gB = _apply(poses[pos[k]], r[1])
-        s = similarity(gB, gA)                      # поправка, которой связь «двигает» кадр k
-        if s is None:
-            bad += 1
-            continue
-        z, c = s
-        ck = cen[k][0] + 1j * cen[k][1]
-        drift = abs(z * ck + c - ck)
-        if 0.8 < abs(z) < 1.25 and abs(np.angle(z)) < 0.35 and drift < CROSS_MAX_DRIFT:
+        s = similarity(r[1], r[0])
+        if s is not None and 0.7 < abs(s[0]) < 1.4:
             new.append((j, k, r[0], r[1]))
-        else:
-            bad += 1
-    print(f"  Пересечения: кандидатов {len(cands)}, совпали {n_match}, отклонено по согласованности {bad}, принято {len(new)}")
-    return edges + new, len(new)
+    print(f"  Петли: прошли проверку RANSAC {len(new)}")
+    if not new:
+        return edges, 0
+    pos = {n: i for i, n in enumerate(best)}
+    keep = list(new)
+    while keep:
+        poses, _ = solve(best, edges + keep, size)
+        er = [edge_rms(e, poses, pos) for e in keep]
+        w = int(np.argmax(er))
+        if er[w] <= CROSS_ACCEPT_RMS:
+            break
+        keep.pop(w)
+    hist = {}
+    for e in keep:
+        key = (frame_of[e[0]] // 1000 * 1000, frame_of[e[1]] // 1000 * 1000)
+        hist[key] = hist.get(key, 0) + 1
+    print(f"  Петли: принято {len(keep)} из {len(new)}; по участкам (кадры от-до, тысячи): {hist}")
+    return edges + keep, len(keep)
 
 
 def illumination(paths, ld):
@@ -484,7 +532,8 @@ def refine_poses(paths, poses):
     out, stat, carry = [], {"moved": 0, "rejected": 0, "free": 0, "shifts": []}, np.zeros(2)
     for p, M in zip(paths, poses):
         M = M.copy()
-        M[:, 2] += carry
+        if REFINE_CARRY:
+            M[:, 2] += carry
         g = np.clip(ld(p).astype(np.float32) * gain[..., None], 0, 255).mean(axis=2)
         g = g - cv2.GaussianBlur(g, (0, 0), 40)            # убираем плавный свет, остаются камни и текстура
         x0, x1, y0, y1, Ml = place(M)
@@ -883,6 +932,17 @@ def diagnose(best, edges, poses, kpaths, top=6):
         print(f"  картинка: link_{a}_{b}.png")
 
 
+def dump_poses(path, nodes, poses, kpaths, size):
+    """Центры кадров на карте (px рабочего размера) для geo_check.py."""
+    cx, cy = size[0] / 2, size[1] / 2
+    rows = []
+    for n, M in zip(nodes, poses):
+        c = M @ np.array([cx, cy, 1.0])
+        rows.append({"frame": fnum(kpaths[n]), "cx": float(c[0]), "cy": float(c[1])})
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(rows, f)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     allp = []
@@ -930,12 +990,11 @@ def main():
         cedges = prune_links(best, edges, size)
         poses, rms = solve(best, cedges, size)
         if CROSS_ENABLE:
-            for _rnd in range(CROSS_ROUNDS):
-                cedges, n_new = add_crossovers(best, cedges, poses, feats, size)
-                if n_new == 0:
-                    break
+            cedges, n_new = add_loops(best, cedges, feats, size, [fnum(p) for p in kpaths])
+            if n_new:
                 poses, rms = solve(best, cedges, size)
         poses_pre = poses                                  # положения ДО уточнения по изображению (для диагностики)
+        dump_poses(os.path.join(OUT, f"poses_part{part}.json"), best, poses_pre, kpaths, size)
         print(f"Кусок {part}: ключевых кадров {len(best)}, "
               f"кадры №{fnum(kpaths[best[0]])}-{fnum(kpaths[best[-1]])}, невязка {rms:.2f} px")
         posd = {n: i for i, n in enumerate(best)}
@@ -955,6 +1014,7 @@ def main():
                   f"без перекрытия {st['free']}; сдвиг медиана {np.median(sh) if sh else 0:.1f} px, макс {max(sh) if sh else 0:.1f} px "
                   f"({time.time() - t2:.0f} с)")
             print(f"  Невязка по связям ORB после уточнения: медиана {np.median(er2):.2f} px (было {np.median(er):.2f})")
+        dump_poses(os.path.join(OUT, f"poses_refined_part{part}.json"), best, poses, kpaths, size)
         t1 = time.time()
         loc = {n: i for i, n in enumerate(best)}
         ledges = [(loc[j], loc[k], A, B) for j, k, A, B in cedges]
