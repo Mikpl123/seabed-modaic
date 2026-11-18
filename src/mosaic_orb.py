@@ -30,11 +30,27 @@ LOOP_STRONG = 120                          # сшивка кусков: одна
 CROSS_ENABLE = True                        # False = выключить (для сравнения "с" и "без")
 CROSS_MIN_GAP = 12                         # пара кандидат, если номера ключевых кадров различаются больше чем на это
 CROSS_RETRIEVE_DESC = 1500                 # сколько дескрипторов брать для грубого поиска похожих кадров
-CROSS_TOP = 150                            # сколько лучших по виду пар проверять полным сопоставлением
+CROSS_TOP = 450                            # сколько лучших по виду пар проверять полным сопоставлением
 CROSS_MIN_INLIERS = 40                     # минимум совпадений для связи-петли (строже, чем MIN_INLIERS)
 CROSS_ACCEPT_RMS = 15.0                    # связь-петля остаётся, если после общего расчёта её невязка не больше, px рабочего размера
 LOOP_FILE = r"C:\Users\79211\Desktop\seabed-modaic\colmap\colmap_detected_loop_sequence_3.txt"                           # проверочный режим: путь к colmap_detected_loop_sequence_3.txt (кандидаты из COLMAP)
 LOOP_FILE_STEP = 20                        # номеров кадров на одну строку/столбец этого файла
+
+# ---------- траектория аппарата на карте ----------
+TRAJ_DRAW = True                           # рисовать путь аппарата: сохраняется отдельная картинка *_traj.png
+TRAJ_START_HUE = 95                        # цвет линии плавно меняется от начала к концу пути: оттенок (0-179, OpenCV) в начале...
+TRAJ_END_HUE = 8                           # ...и в конце (95 = голубой, 8 = оранжевый)
+TRAJ_SMOOTH = 2                            # сглаживание ломаной (0 = без сглаживания, 2-3 = мягко)
+TRAJ_ARROW_SPACING = 240                   # расстояние между стрелками направления, px карты
+TRAJ_START_TEXT = "старт"                  # подписи (для кириллицы нужен Pillow: pip install pillow; без него будет латиница)
+TRAJ_END_TEXT = "конец"
+
+# ---------- швы между проходами ----------
+EXCLUSIVE_PASSES = True                    # там, где аппарат прошёл второй раз, брать картинку только из первого прохода (нет двойных камней)
+PASS_GAP = 12                              # проходом считаем кадры, далёкие по номеру ключевого кадра больше чем на это
+FILL_HOLES = True                          # закрывать «дыры», где поиск шва ничего не выбрал, а кадры это место видят
+RENDER_STEP = 0.45                          # для сборки брать не каждый ключевой кадр, а через шаг в долях размера кадра (0 = все; 0.4-0.5 = реже и шире полосы)
+RENDER_STEP_ANGLE = 0.12                   # ...но и при повороте больше этого угла (рад) кадр тоже берём
 
 # ---------- отладка ----------
 DEBUG_LABELS = True                        # сохранять debug_labels.png: карта раскрашена по кадрам-источникам
@@ -53,7 +69,7 @@ REFINE_MIN_OVERLAP = 0.10                  # минимальная доля п�
 SELECT_MIN = 0.05                          # пиксель заполнен, если лучший кадр лежит на нём не ближе этой доли к краю (0..1)
 SEAM_SCALE = 0.5                           # масштаб, на котором ищем швы (меньше = быстрее и меньше памяти)
 FEATHER = 4.0                              # ширина размытия шва для мелких деталей, px (мало = нет двоения)
-FEATHER_LOW = 25.0                         # ширина смешивания плавного света на шве, px (больше = плавнее переходы яркости)
+FEATHER_LOW = 60                         # ширина смешивания плавного света на шве, px (больше = плавнее переходы яркости)
 SPLIT_SIGMA = 8.0                          # граница между «светом» и «деталями», px
 EXPOSURE_MATCH = True                      # выравнивать яркость кадров между собой (убирает ступеньки на швах)
 
@@ -613,6 +629,7 @@ def render(paths, poses, edges=None, width=None, tag="map"):
     score = ((d / d.max()) * ok).astype(np.float32)        # лучшее место кадра: центр и не тёмный угол
     cover = (m0 > 0).astype(np.float32)
     boxes = [place(M, crn, sc, Wc, Hc, minx, miny) for M in poses_r]
+    centers = [sc * (M @ np.array([w / 2.0, h / 2.0, 1.0]) - np.array([minx, miny])) for M in poses_r]   # центры кадров в пикселях карты
 
     label = None
     try:                                                   # швы ищем на рабочем масштабе (экономит память)
@@ -623,15 +640,42 @@ def render(paths, poses, edges=None, width=None, tag="map"):
         Ws, Hs = int(np.ceil((mxx0 - mnx0) * ss)) + 1, int(np.ceil((mxy0 - mny0) * ss)) + 1
         good = cv2.resize(((score > SELECT_MIN) * 255).astype(np.uint8), (w0, h0), interpolation=cv2.INTER_NEAREST)
         imgs, masks, cors, ids = [], [], [], []
+        covered = np.zeros((Hs, Ws), np.uint8)             # что уже занято кадрами, далёкими по времени (другой проход)
+        pending, done = {}, -1
+        use = set(range(len(paths)))
+        if RENDER_STEP > 0:                                # реже кадры = шире полосы между швами, меньше повторяющегося узора на неровном дне
+            cen0 = lambda Mx: Mx @ np.array([w0 / 2.0, h0 / 2.0, 1.0])
+            use, last = {0}, 0
+            for k in range(1, len(paths)):
+                dist = float(np.linalg.norm(cen0(poses[k]) - cen0(poses[last])))
+                da = np.arctan2(poses[k][1, 0], poses[k][0, 0]) - np.arctan2(poses[last][1, 0], poses[last][0, 0])
+                if dist >= RENDER_STEP * min(w0, h0) or abs(float(np.angle(np.exp(1j * da)))) >= RENDER_STEP_ANGLE:
+                    use.add(k)
+                    last = k
+            use.add(len(paths) - 1)
+            print(f"  Для швов отобрано кадров: {len(use)} из {len(paths)} (шаг {RENDER_STEP:.2f} размера кадра)")
         for idx, (p, M) in enumerate(zip(paths, poses)):
+            if idx not in use:
+                continue
             pl = place(M, crn0, ss, Ws, Hs, mnx0, mny0)
             if pl is None:
                 continue
             x0, x1, y0, y1, Ml = pl
             osz = (x1 - x0, y1 - y0)
+            mk = cv2.warpAffine(good, Ml, osz, flags=cv2.INTER_NEAREST)
+            if EXCLUSIVE_PASSES:
+                while done < idx - PASS_GAP - 1:           # кадры, ушедшие далеко назад по времени, переходят в «занятое»
+                    done += 1
+                    if done in pending:
+                        ox, oy, om = pending.pop(done)
+                        covered[oy:oy + om.shape[0], ox:ox + om.shape[1]][om > 0] = 255
+                pending[idx] = (x0, y0, mk.copy())
+                mk[covered[y0:y1, x0:x1] > 0] = 0          # второй проход не перекрывает первый, берёт только новые места
+                if not mk.any():
+                    continue
             small = cv2.resize(prep(p, idx), (w0, h0), interpolation=cv2.INTER_AREA)
             imgs.append(cv2.warpAffine(small, Ml, osz, flags=cv2.INTER_LINEAR))
-            masks.append(cv2.warpAffine(good, Ml, osz, flags=cv2.INTER_NEAREST))
+            masks.append(mk)
             cors.append((x0, y0))
             ids.append(idx)
         finder = cv2.detail_DpSeamFinder("COLOR_GRAD")
@@ -647,19 +691,31 @@ def render(paths, poses, edges=None, width=None, tag="map"):
         print("  Швы: поиск по совпадению соседних кадров")
     except (AttributeError, cv2.error) as e:
         print(f"  Поиск швов недоступен ({e}), беру кадр с лучшим положением")
-    if label is None:
+    def label_by_score():
+        """На каждом пикселе берём кадр, у которого это место ближе к центру и не в тёмном углу."""
         best = np.zeros((Hc, Wc), np.float32)
-        label = np.full((Hc, Wc), -1, np.int32)
+        lab = np.full((Hc, Wc), -1, np.int32)
         for idx, pl in enumerate(boxes):
             if pl is None:
                 continue
             x0, x1, y0, y1, Ml = pl
             s = cv2.warpAffine(score, Ml, (x1 - x0, y1 - y0), flags=cv2.INTER_LINEAR)
-            bsub, lsub = best[y0:y1, x0:x1], label[y0:y1, x0:x1]
+            bsub, lsub = best[y0:y1, x0:x1], lab[y0:y1, x0:x1]
             better = s > bsub
             bsub[better] = s[better]
             lsub[better] = idx
-        label[best <= SELECT_MIN] = -1
+        lab[best <= SELECT_MIN] = -1
+        return lab
+
+    if label is None:
+        label = label_by_score()
+    elif FILL_HOLES:
+        fb = label_by_score()
+        holes = (label < 0) & (fb >= 0)
+        if holes.any():
+            label[holes] = fb[holes]
+            print(f"  Закрыто пикселей в дырах карты: {int(holes.sum())}")
+        del fb, holes
     valid = label >= 0
 
     if DEBUG_LABELS:                                       # карта, раскрашенная по кадрам-источникам
@@ -727,7 +783,7 @@ def render(paths, poses, edges=None, width=None, tag="map"):
             valid[yb:ye, xb:xe] &= tile_valid
         print(f"  Готово строка тайлов y={yb}:{ye} / {Hc}")
 
-    return mosaic, valid, px
+    return mosaic, valid, px, centers
 
 
 # ---------- улучшение подводного вида готовой карты ----------
@@ -894,6 +950,126 @@ def save_map(mosaic, valid, name, meta, raw=None):
         json.dump(info, f, ensure_ascii=False, indent=2)
 
 
+def _font(size):
+    """Шрифт с кириллицей через Pillow. None, если Pillow или шрифт недоступны."""
+    try:
+        from PIL import ImageFont
+    except ImportError:
+        return None
+    for name in ("segoeui.ttf", "arial.ttf", "DejaVuSans.ttf", "arialbd.ttf", "LiberationSans-Regular.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return None
+
+
+def _put_label(img, text, anchor, size):
+    """Подпись на тёмной полупрозрачной плашке справа от точки anchor. Возвращает прямоугольник (x0, y0, x1, y1)."""
+    H, W = img.shape[:2]
+    font = _font(size)
+    if font is None:                                       # без Pillow: латиница через OpenCV
+        text = {TRAJ_START_TEXT: "start", TRAJ_END_TEXT: "end"}.get(text, text)
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, size / 30.0, 2)
+        x0, y0 = int(anchor[0]), int(anchor[1] - th)
+        cv2.putText(img, text, (x0, y0 + th), cv2.FONT_HERSHEY_SIMPLEX, size / 30.0, (0, 0, 0), 5, cv2.LINE_AA)
+        cv2.putText(img, text, (x0, y0 + th), cv2.FONT_HERSHEY_SIMPLEX, size / 30.0, (255, 255, 255), 2, cv2.LINE_AA)
+        return x0, y0, x0 + tw, y0 + th
+    from PIL import Image, ImageDraw
+    pad = max(4, size // 3)
+    tw = int(font.getlength(text)) if hasattr(font, "getlength") else font.getsize(text)[0]
+    w, h = tw + 2 * pad, size + 2 * pad
+    x0 = int(min(max(anchor[0], 0), W - w - 1))
+    y0 = int(min(max(anchor[1] - h / 2, 0), H - h - 1))
+    crop = Image.fromarray(cv2.cvtColor(img[y0:y0 + h, x0:x0 + w], cv2.COLOR_BGR2RGB)).convert("RGBA")
+    layer = Image.new("RGBA", crop.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    box = (0, 0, w - 1, h - 1)
+    if hasattr(d, "rounded_rectangle"):
+        d.rounded_rectangle(box, radius=h // 3, fill=(20, 24, 28, 190))
+    else:
+        d.rectangle(box, fill=(20, 24, 28, 190))
+    d.text((pad, pad - size // 8), text, font=font, fill=(255, 255, 255, 255))
+    out = Image.alpha_composite(crop, layer).convert("RGB")
+    img[y0:y0 + h, x0:x0 + w] = cv2.cvtColor(np.array(out), cv2.COLOR_RGB2BGR)
+    return x0, y0, x0 + w, y0 + h
+
+
+def _smooth_path(pts, iters):
+    """Лёгкое сглаживание ломаной: усреднение соседей и срезание углов (Чайкин). Концы остаются на месте."""
+    p = np.asarray(pts, np.float64)
+    if iters <= 0 or len(p) < 4:
+        return p
+    q = p.copy()
+    for i in range(1, len(p) - 1):
+        q[i] = (p[i - 1] + p[i] + p[i + 1]) / 3.0
+    p = q
+    for _ in range(iters):
+        q = [p[0]]
+        for a, b in zip(p[:-1], p[1:]):
+            q.append(0.75 * a + 0.25 * b)
+            q.append(0.25 * a + 0.75 * b)
+        q.append(p[-1])
+        p = np.array(q)
+    return p
+
+
+def draw_trajectory(mosaic, valid, centers, out_path):
+    """Карта с путём аппарата: плавная линия, цвет меняется от начала к концу, стрелки направления, плашки «старт» и «конец».
+    Путь строится по центрам ключевых кадров, между ними он сглажен и не является точной траекторией."""
+    if len(centers) < 2:
+        return
+    img = mosaic.copy()
+    mask = np.zeros(valid.shape, np.uint8)
+    S = min(img.shape[:2])
+    th = max(3, int(round(S / 260)))
+    path = _smooth_path(centers, TRAJ_SMOOTH)
+    seg = np.linalg.norm(np.diff(path, axis=0), axis=1)
+    arc = np.r_[0.0, np.cumsum(seg)]
+    total = max(float(arc[-1]), 1.0)
+    ipts = np.rint(path).astype(np.int32)
+
+    halo = img.copy()                                      # мягкая тёмная подложка: линия читается на светлом и тёмном дне
+    cv2.polylines(halo, [ipts.reshape(-1, 1, 2)], False, (15, 15, 15), th + 5, cv2.LINE_AA)
+    img = cv2.addWeighted(halo, 0.55, img, 0.45, 0)
+    cv2.polylines(mask, [ipts.reshape(-1, 1, 2)], False, 255, th + 6)
+
+    def color(t):
+        hue = TRAJ_START_HUE + (TRAJ_END_HUE - TRAJ_START_HUE) * t
+        return tuple(int(v) for v in cv2.cvtColor(np.uint8([[[hue, 230, 255]]]), cv2.COLOR_HSV2BGR)[0, 0])
+
+    for i in range(len(path) - 1):                         # линия с плавным переходом цвета
+        cv2.line(img, tuple(ipts[i]), tuple(ipts[i + 1]), color(arc[i] / total), th, cv2.LINE_AA)
+
+    tri = th * 3.2                                         # стрелки: белые треугольники вдоль пути с равным шагом
+    for s in np.arange(TRAJ_ARROW_SPACING * 0.5, total - tri, TRAJ_ARROW_SPACING):
+        i = min(int(np.searchsorted(arc, s)), len(path) - 2)
+        d = path[i + 1] - path[i]
+        n = float(np.hypot(*d))
+        if n < 1e-6:
+            continue
+        d /= n
+        q = path[i] + d * (s - arc[i])
+        nrm = np.array([-d[1], d[0]])
+        poly = np.array([q + d * tri, q - d * tri * 0.7 + nrm * tri * 0.8, q - d * tri * 0.7 - nrm * tri * 0.8])
+        cv2.fillConvexPoly(img, np.rint(poly).astype(np.int32), (255, 255, 255), cv2.LINE_AA)
+        cv2.polylines(img, [np.rint(poly).astype(np.int32).reshape(-1, 1, 2)], True, (30, 30, 30), 1, cv2.LINE_AA)
+
+    r = th * 3
+    size = max(22, int(S / 38))
+    for p, hue_t, txt in ((path[0], 0.0, TRAJ_START_TEXT), (path[-1], 1.0, TRAJ_END_TEXT)):
+        c = (int(p[0]), int(p[1]))
+        cv2.circle(img, c, r + 3, (255, 255, 255), -1, cv2.LINE_AA)
+        cv2.circle(img, c, r, color(hue_t), -1, cv2.LINE_AA)
+        x0, y0, x1, y1 = _put_label(img, txt, (c[0] + r + 8, c[1]), size)
+        cv2.rectangle(mask, (x0, y0), (x1, y1), 255, -1)
+        cv2.circle(mask, c, r + 4, 255, -1)
+
+    bgra = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+    bgra[:, :, 3] = np.where(valid | (mask > 0), 255, 0).astype(np.uint8)
+    cv2.imwrite(out_path, bgra)
+
+
 # ---------- проверка связей (для тестировщика) ----------
 def draw_link(path_a, path_b, A, B, out_path):
     """Картинка: два кадра рядом и линии между совпавшими точками."""
@@ -1018,7 +1194,7 @@ def main():
         t1 = time.time()
         loc = {n: i for i, n in enumerate(best)}
         ledges = [(loc[j], loc[k], A, B) for j, k, A, B in cedges]
-        raw, valid, px = render([kpaths[i] for i in best], poses, ledges, width=rw, tag=f"part{part}")
+        raw, valid, px, centers = render([kpaths[i] for i in best], poses, ledges, width=rw, tag=f"part{part}")
         # Сначала выравниваем плавный свет, затем выполняем обычное улучшение.
         flat = flat_field_correction(raw, valid, px) if FLAT_FIELD else raw
         mosaic = enhance(flat, valid, px) if ENHANCE else flat
@@ -1028,9 +1204,14 @@ def main():
                                        "first_frame": fnum(kpaths[best[0]]), "last_frame": fnum(kpaths[best[-1]]),
                                        "frames_total": len(allp), "rms_px": round(rms, 3),
                                        "render_width": rw, "refined": bool(REFINE),
-                                       "crossovers": bool(CROSS_ENABLE)},
+                                       "crossovers": bool(CROSS_ENABLE),
+                                       "trajectory_px": [{"frame": fnum(kpaths[n]), "x": round(float(c[0]), 1), "y": round(float(c[1]), 1)}
+                                                         for n, c in zip(best, centers)]},
                  raw=raw if ENHANCE else None)
         print(f"  Файл: {name}.png, размер {mosaic.shape[1]}x{mosaic.shape[0]}")
+        if TRAJ_DRAW:
+            draw_trajectory(mosaic, valid, centers, os.path.join(OUT, name + "_traj.png"))
+            print(f"  Путь аппарата: {name}_traj.png")
         results.append((best, poses))
     print(f"Готово за {time.time() - t0:.0f} с.")
     return keys, results
