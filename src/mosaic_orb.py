@@ -45,6 +45,15 @@ TRAJ_ARROW_SPACING = 240                   # расстояние между с�
 TRAJ_START_TEXT = "старт"                  # подписи (для кириллицы нужен Pillow: pip install pillow; без него будет латиница)
 TRAJ_END_TEXT = "конец"
 
+# ---------- навигация как подсказка положениям (необязательно) ----------
+NAV_FILE = None                            # файл с координатами аппарата: строки "кадр x y ..." (пробелы, запятые или ;). None = не использовать
+NAV_COL_FRAME = 0                          # номер столбца с номером кадра (с нуля)
+NAV_COLS = (1, 2)                          # столбцы координат на плоскости дна (для COLMAP из Aqualoc это x и y)
+NAV_LAGS = (24, 72)                        # навигация подсказывает смещение между ключевыми кадрами на таком расстоянии друг от друга
+NAV_WEIGHT = 1.0                           # 1 = навигация держит так же жёстко, как цепочка ORB; 0.3 = мягко, 3 = жёстко
+LOOP_WEIGHT = 1                            # во сколько раз усилить связи-петли в общем расчёте (1 = как есть; пробуйте 2-3)
+TRAJ_EXPORT = True                         # сохранять путь аппарата в *_traj.geojson и *_traj.csv (для QGIS и интерфейса)
+
 # ---------- швы между проходами ----------
 EXCLUSIVE_PASSES = True                    # там, где аппарат прошёл второй раз, брать картинку только из первого прохода (нет двойных камней)
 PASS_GAP = 12                              # проходом считаем кадры, далёкие по номеру ключевого кадра больше чем на это
@@ -69,7 +78,7 @@ REFINE_MIN_OVERLAP = 0.10                  # минимальная доля п�
 SELECT_MIN = 0.05                          # пиксель заполнен, если лучший кадр лежит на нём не ближе этой доли к краю (0..1)
 SEAM_SCALE = 0.5                           # масштаб, на котором ищем швы (меньше = быстрее и меньше памяти)
 FEATHER = 4.0                              # ширина размытия шва для мелких деталей, px (мало = нет двоения)
-FEATHER_LOW = 60                         # ширина смешивания плавного света на шве, px (больше = плавнее переходы яркости)
+FEATHER_LOW = 25.0                         # ширина смешивания плавного света на шве, px (больше = плавнее переходы яркости)
 SPLIT_SIGMA = 8.0                          # граница между «светом» и «деталями», px
 EXPOSURE_MATCH = True                      # выравнивать яркость кадров между собой (убирает ступеньки на швах)
 
@@ -196,7 +205,7 @@ def components(n, edges):
     return sorted(groups.values(), key=len, reverse=True)
 
 
-def solve(nodes, edges, size):
+def solve(nodes, edges, size, nav_pairs=None):
     """Подбираем положение каждого кадра (поворот, масштаб, сдвиг) так,
     чтобы одни и те же камни во всех кадрах легли в одно место."""
     pos = {n: i for i, n in enumerate(nodes)}
@@ -221,6 +230,16 @@ def solve(nodes, edges, size):
         ids = np.r_[4 * pos[j]:4 * pos[j] + 4, 4 * pos[k]:4 * pos[k] + 4]
         H[np.ix_(ids, ids)] += J.T @ J
         used.append((ids, J))
+    for j, k, dx, dy, w in (nav_pairs or []):  # подсказка навигации: смещение между центрами кадров j и k
+        if j in pos and k in pos:
+            for off, d in ((2, dx), (3, dy)):
+                ia, ib = 4 * pos[k] + off, 4 * pos[j] + off
+                H[ia, ia] += w
+                H[ib, ib] += w
+                H[ia, ib] -= w
+                H[ib, ia] -= w
+                rhs[ia] += w * d
+                rhs[ib] -= w * d
     W = 1e6                                  # первый кадр закреплён
     H[:4, :4] += W * np.eye(4)
     rhs[:4] += W * np.array([1.0, 0, 0, 0])
@@ -441,7 +460,65 @@ def add_loops(best, edges, feats, size, frame_of):
         key = (frame_of[e[0]] // 1000 * 1000, frame_of[e[1]] // 1000 * 1000)
         hist[key] = hist.get(key, 0) + 1
     print(f"  Петли: принято {len(keep)} из {len(new)}; по участкам (кадры от-до, тысячи): {hist}")
-    return edges + keep, len(keep)
+    return edges + keep * max(1, int(LOOP_WEIGHT)), len(keep)
+
+
+def load_nav(path):
+    """Читает таблицу из текстового файла: числа через пробелы, запятые или ';'; нечисловые строки пропускает."""
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                rows.append([float(x) for x in re.split(r"[,\s;]+", line) if x != ""])
+            except ValueError:
+                continue
+    if not rows:
+        raise ValueError("в файле навигации нет числовых строк")
+    n = min(len(r) for r in rows)
+    return np.array([r[:n] for r in rows], float)
+
+
+def nav_pairs(best, poses, kpaths, size, nav):
+    """Подсказка положениям от навигации. Подгоняем координаты навигации к цепочке ORB (поворот, масштаб, зеркало:
+    ось и единицы в файле нам неизвестны), потом берём из навигации смещения между кадрами на расстоянии NAV_LAGS
+    ключевых кадров. Абсолютное положение не задаём: у цепочки нет привязки, важны только смещения (они и копят дрейф)."""
+    frames = np.array([fnum(kpaths[n]) for n in best], float)
+    fn = nav[:, NAV_COL_FRAME]
+    ok = np.where((frames >= fn.min()) & (frames <= fn.max()))[0]
+    if len(ok) < 10:
+        print("  Навигация: номера кадров в файле не совпадают с кадрами карты, подсказка не используется")
+        return None
+    c0, c1 = NAV_COLS
+    X = np.c_[np.interp(frames[ok], fn, nav[:, c0]), np.interp(frames[ok], fn, nav[:, c1])]
+    cx, cy = size[0] / 2, size[1] / 2
+    Y = np.array([_apply(poses[i], np.array([[cx, cy]]))[0] for i in ok])
+    fit = None
+    for mirror in (False, True):
+        Xm = X.copy()
+        if mirror:
+            Xm[:, 0] = -Xm[:, 0]
+        s = similarity(Xm, Y)
+        if s is None:
+            continue
+        z, c = s
+        Zc = z * (Xm[:, 0] + 1j * Xm[:, 1]) + c
+        rms = float(np.sqrt(np.mean(np.abs(Zc - (Y[:, 0] + 1j * Y[:, 1])) ** 2)))
+        if fit is None or rms < fit[0]:
+            fit = (rms, mirror, z, Zc)
+    if fit is None:
+        return None
+    rms, mirror, z, Zc = fit
+    print(f"  Навигация: подгонка к цепочке ORB: расхождение {rms:.0f} px, масштаб {abs(z):.1f} px на единицу"
+          f"{', зеркало' if mirror else ''}")
+    pairs = []
+    for L in NAV_LAGS:
+        for a in range(0, len(ok) - L):
+            d = Zc[a + L] - Zc[a]
+            pairs.append((best[ok[a]], best[ok[a + L]], float(d.real), float(d.imag), NAV_WEIGHT * 80.0 / L))
+    return pairs
 
 
 def illumination(paths, ld):
@@ -1070,6 +1147,29 @@ def draw_trajectory(mosaic, valid, centers, out_path):
     cv2.imwrite(out_path, bgra)
 
 
+def save_trajectory(name, frames, centers):
+    """Путь аппарата в координатах карты (те же, что у GeoTIFF: левый верхний угол GEO_ORIGIN, Y вверх, пиксель = GEO_MPP).
+    Без GEO_MPP это пиксели карты. GeoJSON открывается в QGIS поверх .tif, CSV читает любой интерфейс."""
+    mpp = float(GEO_MPP) if GEO_MPP else 1.0
+    x0, y0 = GEO_ORIGIN
+    pts = [[round(x0 + float(c[0]) * mpp, 3), round(y0 - float(c[1]) * mpp, 3)] for c in centers]
+    gj = {"type": "FeatureCollection",
+          "features": [{"type": "Feature", "properties": {"name": "trajectory", "keyframes": len(pts)},
+                        "geometry": {"type": "LineString", "coordinates": pts}}] +
+                      [{"type": "Feature", "properties": {"frame": int(f)}, "geometry": {"type": "Point", "coordinates": p}}
+                       for f, p in zip(frames, pts)]}
+    if GEO_EPSG:
+        gj["crs"] = {"type": "name", "properties": {"name": f"urn:ogc:def:crs:EPSG::{int(GEO_EPSG)}"}}
+    else:
+        gj["units"] = "px (локальные координаты, без привязки)"
+    with open(os.path.join(OUT, name + "_traj.geojson"), "w", encoding="utf-8") as f:
+        json.dump(gj, f, ensure_ascii=False)
+    with open(os.path.join(OUT, name + "_traj.csv"), "w", encoding="utf-8") as f:
+        f.write("frame,x,y,map_px_x,map_px_y\n")
+        for fr_, p, c in zip(frames, pts, centers):
+            f.write(f"{int(fr_)},{p[0]},{p[1]},{float(c[0]):.1f},{float(c[1]):.1f}\n")
+
+
 # ---------- проверка связей (для тестировщика) ----------
 def draw_link(path_a, path_b, A, B, out_path):
     """Картинка: два кадра рядом и линии между совпавшими точками."""
@@ -1169,8 +1269,27 @@ def main():
             cedges, n_new = add_loops(best, cedges, feats, size, [fnum(p) for p in kpaths])
             if n_new:
                 poses, rms = solve(best, cedges, size)
+        if NAV_FILE:
+            try:
+                nav = load_nav(NAV_FILE)
+            except (OSError, ValueError) as e:
+                nav = None
+                print(f"  Навигация не прочитана ({str(e)[:70]}), подсказка не используется")
+            if nav is not None:
+                npairs = nav_pairs(best, poses, kpaths, size, nav)
+                if npairs:
+                    cc = np.array([[size[0] / 2, size[1] / 2]])
+                    before = [_apply(M, cc)[0] for M in poses]
+                    poses, rms = solve(best, cedges, size, npairs)
+                    mv = [float(np.linalg.norm(_apply(M, cc)[0] - b0)) for M, b0 in zip(poses, before)]
+                    print(f"  Навигация учтена: положения сдвинулись на {np.median(mv):.0f} px (медиана), до {max(mv):.0f} px")
         poses_pre = poses                                  # положения ДО уточнения по изображению (для диагностики)
         dump_poses(os.path.join(OUT, f"poses_part{part}.json"), best, poses_pre, kpaths, size)
+        posd0 = {n: i for i, n in enumerate(best)}
+        lo = [edge_rms(e, poses, posd0) for e in cedges if e[1] - e[0] > CROSS_MIN_GAP]
+        ch = [edge_rms(e, poses, posd0) for e in cedges if e[1] - e[0] <= CROSS_MIN_GAP]
+        if lo and ch:
+            print(f"  Невязка связей-петель: медиана {np.median(lo):.1f} px (обычных связей {np.median(ch):.1f} px), петель {len(lo)}")
         print(f"Кусок {part}: ключевых кадров {len(best)}, "
               f"кадры №{fnum(kpaths[best[0]])}-{fnum(kpaths[best[-1]])}, невязка {rms:.2f} px")
         posd = {n: i for i, n in enumerate(best)}
@@ -1212,6 +1331,9 @@ def main():
         if TRAJ_DRAW:
             draw_trajectory(mosaic, valid, centers, os.path.join(OUT, name + "_traj.png"))
             print(f"  Путь аппарата: {name}_traj.png")
+        if TRAJ_EXPORT:
+            save_trajectory(name, [fnum(kpaths[n]) for n in best], centers)
+            print(f"  Путь аппарата: {name}_traj.geojson, {name}_traj.csv")
         results.append((best, poses))
     print(f"Готово за {time.time() - t0:.0f} с.")
     return keys, results
