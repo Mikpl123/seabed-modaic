@@ -70,6 +70,13 @@ def main(traj_path=TRAJ, poses_path=POSES):
     if rms > 0.1 * span:
         print("Невязка больше 10% размера карты: либо не тот файл траектории, либо не та последовательность, "
               "либо дрейф цепочки ORB очень большой. Привязывать картинку к этим координатам пока нельзя.")
+    if all("scale" in p for p in P):
+        sc = np.array([p["scale"] for p in P])[ok]
+        zc = np.interp(fr, T[:, 0], T[:, 3])
+        if np.std(sc) > 1e-6 and np.std(zc) > 1e-9:
+            rr = float(np.corrcoef(np.log(sc), zc)[0, 1])
+            print(f"Масштаб кадров у нас и высота камеры COLMAP (z): корреляция {rr:+.2f}, масштаб от {sc.min():.2f} до {sc.max():.2f}. "
+                  f"{'Масштаб следует за высотой: его нельзя держать равным 1.' if abs(rr) > 0.6 else 'Связь слабая.'}")
     worst = np.argsort(-r)[:8]
     print("Кадры, где цепочка ORB дальше всего от траектории (там дрейф):")
     for i in sorted(worst):

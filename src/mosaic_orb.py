@@ -51,8 +51,12 @@ NAV_COL_FRAME = 0                          # номер столбца с ном
 NAV_COLS = (1, 2)                          # столбцы координат на плоскости дна (для COLMAP из Aqualoc это x и y)
 NAV_LAGS = (24, 72)                        # навигация подсказывает смещение между ключевыми кадрами на таком расстоянии друг от друга
 NAV_WEIGHT = 1.0                           # 1 = навигация держит так же жёстко, как цепочка ORB; 0.3 = мягко, 3 = жёстко
-LOOP_WEIGHT = 1                            # во сколько раз усилить связи-петли в общем расчёте (1 = как есть; пробуйте 2-3)
+LOOP_WEIGHT = 3                            # во сколько раз усилить связи-петли в общем расчёте (1 = как есть; пробуйте 2-3)
 TRAJ_EXPORT = True                         # сохранять путь аппарата в *_traj.geojson и *_traj.csv (для QGIS и интерфейса)
+
+# ---------- модель положения кадра ----------
+FRAME_MODEL = "similarity"                     # "similarity" = поворот+масштаб+сдвиг; "affine" = ещё и неравный масштаб по осям/перекос (наклон камеры)
+AFFINE_REG = 3e6                           # насколько жёстко держать аффинную модель близкой к подобию (больше = ближе к "similarity")
 
 # ---------- швы между проходами ----------
 EXCLUSIVE_PASSES = True                    # там, где аппарат прошёл второй раз, брать картинку только из первого прохода (нет двойных камней)
@@ -340,6 +344,74 @@ PRUNE_FACTOR = 2.5                         # выбрасываем, если н
 PRUNE_MIN_PX = 5.0                         # ...и больше этого числа пикселей
 
 
+def solve_affine(nodes, edges, size):
+    """Как solve, но положение кадра аффинное (6 чисел): масштаб по осям может быть разным и допустим небольшой перекос,
+    так что наклонная камера описывается точнее. От произвольной деформации держит мягкая привязка к подобию (AFFINE_REG),
+    масштаб в среднем тянется к 1, как и в обычном solve."""
+    pos = {n: i for i, n in enumerate(nodes)}
+    m = len(nodes)
+    cx, cy = size[0] / 2, size[1] / 2
+    N = 6 * m
+    H = np.zeros((N, N))
+    rhs = np.zeros(N)
+    rng = np.random.default_rng(0)
+    used = []
+    for j, k, A, B in edges:
+        if j not in pos or k not in pos:
+            continue
+        if len(A) > 80:
+            sel = rng.choice(len(A), 80, replace=False)
+            A, B = A[sel], B[sel]
+        u, v = A - (cx, cy), B - (cx, cy)
+        n = len(u)
+        z, o = np.zeros(n), np.ones(n)
+        J = np.zeros((2 * n, 12))
+        J[0::2] = np.c_[u[:, 0], u[:, 1], z, z, o, z, -v[:, 0], -v[:, 1], z, z, -o, z]
+        J[1::2] = np.c_[z, z, u[:, 0], u[:, 1], z, o, z, z, -v[:, 0], -v[:, 1], z, -o]
+        ids = np.r_[6 * pos[j]:6 * pos[j] + 6, 6 * pos[k]:6 * pos[k] + 6]
+        H[np.ix_(ids, ids)] += J.T @ J
+        used.append((ids, J))
+    W = 1e6                                  # первый кадр закреплён
+    H[:6, :6] += W * np.eye(6)
+    rhs[:6] += W * np.array([1.0, 0, 0, 1.0, 0, 0])
+    for i in range(m):                       # мягко: a22 = a11, a12 = -a21 (подобие)
+        ia, ib, ic, idd = 6 * i, 6 * i + 1, 6 * i + 2, 6 * i + 3
+        H[ia, ia] += AFFINE_REG
+        H[idd, idd] += AFFINE_REG
+        H[ia, idd] -= AFFINE_REG
+        H[idd, ia] -= AFFINE_REG
+        H[ib, ib] += AFFINE_REG
+        H[ic, ic] += AFFINE_REG
+        H[ib, ic] += AFFINE_REG
+        H[ic, ib] += AFFINE_REG
+    p = np.linalg.solve(H, rhs)
+    H2, rhs2 = H.copy(), rhs.copy()
+    if SCALE_PRIOR > 0:                      # средний масштаб кадра мягко к 1, поворот сохраняем
+        w = 2 * SCALE_PRIOR
+        for i in range(m):
+            ia, ib, ic, idd = 6 * i, 6 * i + 1, 6 * i + 2, 6 * i + 3
+            s, r = 0.5 * (p[ia] + p[idd]), 0.5 * (p[ic] - p[ib])
+            nrm = max(float(np.hypot(s, r)), 1e-6)
+            for ids2, coef, target in (((ia, idd), (0.5, 0.5), s / nrm), ((ib, ic), (-0.5, 0.5), r / nrm)):
+                for x_, cx_ in zip(ids2, coef):
+                    for y_, cy_ in zip(ids2, coef):
+                        H2[x_, y_] += w * cx_ * cy_
+                    rhs2[x_] += w * cx_ * target
+    p = np.linalg.solve(H2, rhs2)
+    sq, cnt = 0.0, 0
+    for ids, J in used:
+        r = J @ p[ids]
+        sq += float((r ** 2).sum())
+        cnt += len(r)
+    rms = (sq / max(cnt, 1)) ** 0.5
+    poses = []
+    for i in range(m):
+        a_, b_, c_, d_, tx, ty = p[6 * i:6 * i + 6]
+        poses.append(np.array([[a_, b_, tx - (a_ * cx + b_ * cy)],
+                               [c_, d_, ty - (c_ * cx + d_ * cy)]]))
+    return poses, rms
+
+
 def edge_rms(e, poses, pos):
     j, k, A, B = e
     Mj, Mk = poses[pos[j]], poses[pos[k]]
@@ -488,9 +560,10 @@ def nav_pairs(best, poses, kpaths, size, nav):
     frames = np.array([fnum(kpaths[n]) for n in best], float)
     fn = nav[:, NAV_COL_FRAME]
     ok = np.where((frames >= fn.min()) & (frames <= fn.max()))[0]
-    if len(ok) < 10:
-        print("  Навигация: номера кадров в файле не совпадают с кадрами карты, подсказка не используется")
-        return None
+    if len(ok) < 2 * min(NAV_LAGS):
+        if len(best) >= 2 * min(NAV_LAGS):
+            print("  Навигация: номера кадров в файле не совпадают с кадрами карты, подсказка не используется")
+        return None                                        # маленький кусок: подгонка ненадёжна, подсказку не берём
     c0, c1 = NAV_COLS
     X = np.c_[np.interp(frames[ok], fn, nav[:, c0]), np.interp(frames[ok], fn, nav[:, c1])]
     cx, cy = size[0] / 2, size[1] / 2
@@ -1214,9 +1287,69 @@ def dump_poses(path, nodes, poses, kpaths, size):
     rows = []
     for n, M in zip(nodes, poses):
         c = M @ np.array([cx, cy, 1.0])
-        rows.append({"frame": fnum(kpaths[n]), "cx": float(c[0]), "cy": float(c[1])})
+        rows.append({"frame": fnum(kpaths[n]), "cx": float(c[0]), "cy": float(c[1]),
+                     "scale": float(np.hypot(M[0, 0], M[1, 0]))})
     with open(path, "w", encoding="utf-8") as f:
         json.dump(rows, f)
+
+
+def cycle_check(edges, size, max_triplets=4000):
+    """Решающая проверка модели положения кадра. Берём тройки кадров i<j<k, у которых есть все три связи (i,j), (j,k), (i,k).
+    Если собрать связи (i,j) и (j,k) в цепочку, получится положение k относительно i; оно должно совпасть с прямой связью (i,k).
+    Расхождение считаем по углам кадра в пикселях. Делаем это для трёх моделей: поворот+масштаб+сдвиг (то, что мы используем),
+    аффинной и перспективной. Если перспективная/аффинная сходится заметно лучше, модель кадра надо усложнять;
+    если все три одинаково плохи, дело в рельефе дна (параллакс), и 2D-модель тут не поможет."""
+    def to3(M):
+        M = np.asarray(M, np.float64)
+        return np.vstack([M, [0, 0, 1]]) if M.shape == (2, 3) else M
+
+    fits = {}
+    for j, k, A, B in edges:
+        if (j, k) in fits or len(A) < 8:
+            continue
+        try:
+            s, _ = cv2.estimateAffinePartial2D(B, A, method=cv2.LMEDS)
+            af, _ = cv2.estimateAffine2D(B, A, method=cv2.LMEDS)
+            hm, _ = cv2.findHomography(B, A, cv2.LMEDS)
+        except cv2.error:
+            continue
+        if s is None or af is None or hm is None:
+            continue
+        fits[(j, k)] = (to3(s), to3(af), to3(hm))
+    w, h = size
+    corners = np.array([[0, 0, 1], [w, 0, 1], [w, h, 1], [0, h, 1]], np.float64).T
+
+    def corner_err(P, Q):
+        a, b = P @ corners, Q @ corners
+        a, b = a[:2] / a[2], b[:2] / b[2]
+        return float(np.mean(np.linalg.norm(a - b, axis=0)))
+
+    errs = [[], [], []]
+    nodes = sorted({n for e in fits for n in e})
+    succ = {}
+    for (j, k) in fits:
+        succ.setdefault(j, []).append(k)
+    cnt = 0
+    for i in nodes:
+        for j in succ.get(i, []):
+            for k in succ.get(j, []):
+                if (i, k) in fits and k - i <= 3 * NEIGHBORS:
+                    for m_ in range(3):
+                        errs[m_].append(corner_err(fits[(i, j)][m_] @ fits[(j, k)][m_], fits[(i, k)][m_]))
+                    cnt += 1
+                    if cnt >= max_triplets:
+                        break
+            if cnt >= max_triplets:
+                break
+        if cnt >= max_triplets:
+            break
+    if not cnt:
+        print("  Проверка модели кадра: троек связей не нашлось")
+        return
+    names = ("поворот+масштаб+сдвиг (сейчас)", "аффинная", "перспективная")
+    print(f"  Проверка модели кадра по {cnt} тройкам связей (расхождение цепочки и прямой связи по углам кадра, px):")
+    for nm, e in zip(names, errs):
+        print(f"    {nm}: медиана {np.median(e):.1f}, 90% ниже {np.percentile(e, 90):.1f}")
 
 
 def main():
@@ -1283,13 +1416,29 @@ def main():
                     poses, rms = solve(best, cedges, size, npairs)
                     mv = [float(np.linalg.norm(_apply(M, cc)[0] - b0)) for M, b0 in zip(poses, before)]
                     print(f"  Навигация учтена: положения сдвинулись на {np.median(mv):.0f} px (медиана), до {max(mv):.0f} px")
+        if FRAME_MODEL == "affine":
+            try:
+                pa, ra = solve_affine(best, cedges, size)
+                posd_a = {n: k_ for k_, n in enumerate(best)}
+                e_s = float(np.median([edge_rms(e, poses, posd_a) for e in cedges]))
+                e_a = float(np.median([edge_rms(e, pa, posd_a) for e in cedges]))
+                sv = [np.linalg.svd(M[:, :2], compute_uv=False) for M in pa]
+                aniso = max(float(s_[0] / s_[1]) for s_ in sv)
+                ok_a = np.isfinite(e_a) and aniso < 1.4
+                print(f"  Аффинная модель кадров: невязка по связям медиана {e_a:.2f} px (подобие: {e_s:.2f} px), "
+                      f"наибольшая неравномерность масштаба по осям {aniso:.2f}" + ("" if ok_a else "; отклонена, оставляю подобие"))
+                if ok_a:
+                    poses, rms = pa, ra
+            except np.linalg.LinAlgError:
+                print("  Аффинная модель не рассчиталась, оставляю подобие")
         poses_pre = poses                                  # положения ДО уточнения по изображению (для диагностики)
         dump_poses(os.path.join(OUT, f"poses_part{part}.json"), best, poses_pre, kpaths, size)
         posd0 = {n: i for i, n in enumerate(best)}
         lo = [edge_rms(e, poses, posd0) for e in cedges if e[1] - e[0] > CROSS_MIN_GAP]
         ch = [edge_rms(e, poses, posd0) for e in cedges if e[1] - e[0] <= CROSS_MIN_GAP]
         if lo and ch:
-            print(f"  Невязка связей-петель: медиана {np.median(lo):.1f} px (обычных связей {np.median(ch):.1f} px), петель {len(lo)}")
+            print(f"  Невязка связей-петель: медиана {np.median(lo):.1f} px (обычных связей {np.median(ch):.1f} px), "
+                  f"петель {len({(e[0], e[1]) for e in cedges if e[1] - e[0] > CROSS_MIN_GAP})}")
         print(f"Кусок {part}: ключевых кадров {len(best)}, "
               f"кадры №{fnum(kpaths[best[0]])}-{fnum(kpaths[best[-1]])}, невязка {rms:.2f} px")
         posd = {n: i for i, n in enumerate(best)}
@@ -1300,6 +1449,7 @@ def main():
         print(f"  Масштаб кадров: от {min(sc_all):.2f} до {max(sc_all):.2f} (первый = 1.00)")
         if part == 0:
             diagnose(best, cedges, poses_pre, kpaths)      # невязки общего расчёта, а не после refine
+            cycle_check(cedges, size)
         if REFINE:
             t2 = time.time()
             poses, st = refine_poses([kpaths[i] for i in best], poses)
