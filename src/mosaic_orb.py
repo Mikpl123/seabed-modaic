@@ -9,10 +9,18 @@ import numpy as np
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+LOG = print                                # куда писать сообщения; интерфейс может подставить свою функцию: mosaic_orb.LOG = f
+
+
+def log(*args, **kwargs):
+    LOG(*args, **kwargs)
+
+
 # ---------- вход и выход ----------
 SRC = os.path.join(BASE, "dataset")        # папка со всеми кадрами
 OUT = os.path.join(BASE, "output")
 START, END = 0, None                       # с какого по порядку кадра брать (END = None: до конца)
+MAP_NAME = None                            # название карты: префикс имён выходных файлов (None = "orb_s<START>"); пробелы и знаки вроде / \ : * ? заменяются на _
 
 # ---------- ключевые кадры и связи (ORB) ----------
 WIDTH = 480                                # рабочая ширина кадра для поиска положений
@@ -33,7 +41,7 @@ CROSS_RETRIEVE_DESC = 1500                 # сколько дескриптор
 CROSS_TOP = 450                            # сколько лучших по виду пар проверять полным сопоставлением
 CROSS_MIN_INLIERS = 40                     # минимум совпадений для связи-петли (строже, чем MIN_INLIERS)
 CROSS_ACCEPT_RMS = 15.0                    # связь-петля остаётся, если после общего расчёта её невязка не больше, px рабочего размера
-LOOP_FILE = r"C:\Users\79211\Desktop\seabed-modaic\colmap\colmap_detected_loop_sequence_3.txt"                           # проверочный режим: путь к colmap_detected_loop_sequence_3.txt (кандидаты из COLMAP)
+LOOP_FILE = None                           # проверочный режим: путь к colmap_detected_loop_sequence_3.txt (кандидаты из COLMAP)
 LOOP_FILE_STEP = 20                        # номеров кадров на одну строку/столбец этого файла
 
 # ---------- траектория аппарата на карте ----------
@@ -51,18 +59,18 @@ NAV_COL_FRAME = 0                          # номер столбца с ном
 NAV_COLS = (1, 2)                          # столбцы координат на плоскости дна (для COLMAP из Aqualoc это x и y)
 NAV_LAGS = (24, 72)                        # навигация подсказывает смещение между ключевыми кадрами на таком расстоянии друг от друга
 NAV_WEIGHT = 1.0                           # 1 = навигация держит так же жёстко, как цепочка ORB; 0.3 = мягко, 3 = жёстко
-LOOP_WEIGHT = 3                            # во сколько раз усилить связи-петли в общем расчёте (1 = как есть; пробуйте 2-3)
+LOOP_WEIGHT = 3                           # во сколько раз усилить связи-петли в общем расчёте (1 = как есть; пробуйте 2-3)
 TRAJ_EXPORT = True                         # сохранять путь аппарата в *_traj.geojson и *_traj.csv (для QGIS и интерфейса)
 
 # ---------- модель положения кадра ----------
-FRAME_MODEL = "similarity"                     # "similarity" = поворот+масштаб+сдвиг; "affine" = ещё и неравный масштаб по осям/перекос (наклон камеры)
-AFFINE_REG = 3e6                           # насколько жёстко держать аффинную модель близкой к подобию (больше = ближе к "similarity")
+FRAME_MODEL = "similarity"                 # "similarity" = поворот+масштаб+сдвиг; "affine" = ещё и неравный масштаб по осям/перекос (наклон камеры)
+AFFINE_REG = 3e5                           # насколько жёстко держать аффинную модель близкой к подобию (больше = ближе к "similarity")
 
 # ---------- швы между проходами ----------
 EXCLUSIVE_PASSES = True                    # там, где аппарат прошёл второй раз, брать картинку только из первого прохода (нет двойных камней)
 PASS_GAP = 12                              # проходом считаем кадры, далёкие по номеру ключевого кадра больше чем на это
 FILL_HOLES = True                          # закрывать «дыры», где поиск шва ничего не выбрал, а кадры это место видят
-RENDER_STEP = 0.45                          # для сборки брать не каждый ключевой кадр, а через шаг в долях размера кадра (0 = все; 0.4-0.5 = реже и шире полосы)
+RENDER_STEP = 0.45                         # для сборки брать не каждый ключевой кадр, а через шаг в долях размера кадра (0 = все; 0.4-0.5 = реже и шире полосы)
 RENDER_STEP_ANGLE = 0.12                   # ...но и при повороте больше этого угла (рад) кадр тоже берём
 
 # ---------- отладка ----------
@@ -331,7 +339,7 @@ def link_pieces(feats, edges, size):
                 if len(best) >= 2 or (best and cands[best[0]][0] >= LOOP_STRONG):
                     top = sorted(best, key=lambda m: -cands[m][0])[:6]
                     added += [(cands[m][1], cands[m][2], cands[m][5], cands[m][6]) for m in top]
-                    print(f"  Сшивка: куски из {len(ids_a)} и {len(ids_b)} кадров связаны через общее место "
+                    log(f"  Сшивка: куски из {len(ids_a)} и {len(ids_b)} кадров связаны через общее место "
                           f"(подтверждений {len(best)}, макс. совпадений {max(cands[m][0] for m in best)})")
         if not added:
             break
@@ -442,7 +450,7 @@ def prune_links(best, edges, size, rounds=3):
             break
         edges = [e for t, e in enumerate(edges) if t not in drop]
         removed += len(drop)
-    print(f"Отбраковано связей: {removed} (осталось {len(edges)})")
+    log(f"Отбраковано связей: {removed} (осталось {len(edges)})")
     return edges
 
 
@@ -474,10 +482,10 @@ def loop_file_pairs(best, frame_of, linked):
     try:
         L = np.loadtxt(LOOP_FILE, delimiter=",")
     except (ValueError, OSError) as e:
-        print(f"  LOOP_FILE не прочитан ({str(e)[:60]}): нужен файл с матрицей из 0 и 1 через запятую. Беру поиск по виду.")
+        log(f"  LOOP_FILE не прочитан ({str(e)[:60]}): нужен файл с матрицей из 0 и 1 через запятую. Беру поиск по виду.")
         return None
     if L.ndim != 2 or L.shape[0] != L.shape[1]:
-        print("  LOOP_FILE не квадратная матрица. Беру поиск по виду.")
+        log("  LOOP_FILE не квадратная матрица. Беру поиск по виду.")
         return None
     fr = np.array([frame_of[n] for n in best])
     pairs = set()
@@ -501,12 +509,12 @@ def add_loops(best, edges, feats, size, frame_of):
     if LOOP_FILE:
         cand = loop_file_pairs(best, frame_of, linked)
         if cand is not None:
-            print(f"  Петли: кандидатов из файла COLMAP {len(cand)}")
+            log(f"  Петли: кандидатов из файла COLMAP {len(cand)}")
     else:
         cand = None
     if cand is None:
         cand = retrieve_pairs(best, feats, linked)
-        print(f"  Петли: кандидатов по внешнему виду {len(cand)}")
+        log(f"  Петли: кандидатов по внешнему виду {len(cand)}")
     new = []
     for j, k in cand:
         r = match(feats[j], feats[k], CROSS_MIN_INLIERS)
@@ -515,7 +523,7 @@ def add_loops(best, edges, feats, size, frame_of):
         s = similarity(r[1], r[0])
         if s is not None and 0.7 < abs(s[0]) < 1.4:
             new.append((j, k, r[0], r[1]))
-    print(f"  Петли: прошли проверку RANSAC {len(new)}")
+    log(f"  Петли: прошли проверку RANSAC {len(new)}")
     if not new:
         return edges, 0
     pos = {n: i for i, n in enumerate(best)}
@@ -531,7 +539,7 @@ def add_loops(best, edges, feats, size, frame_of):
     for e in keep:
         key = (frame_of[e[0]] // 1000 * 1000, frame_of[e[1]] // 1000 * 1000)
         hist[key] = hist.get(key, 0) + 1
-    print(f"  Петли: принято {len(keep)} из {len(new)}; по участкам (кадры от-до, тысячи): {hist}")
+    log(f"  Петли: принято {len(keep)} из {len(new)}; по участкам (кадры от-до, тысячи): {hist}")
     return edges + keep * max(1, int(LOOP_WEIGHT)), len(keep)
 
 
@@ -562,7 +570,7 @@ def nav_pairs(best, poses, kpaths, size, nav):
     ok = np.where((frames >= fn.min()) & (frames <= fn.max()))[0]
     if len(ok) < 2 * min(NAV_LAGS):
         if len(best) >= 2 * min(NAV_LAGS):
-            print("  Навигация: номера кадров в файле не совпадают с кадрами карты, подсказка не используется")
+            log("  Навигация: номера кадров в файле не совпадают с кадрами карты, подсказка не используется")
         return None                                        # маленький кусок: подгонка ненадёжна, подсказку не берём
     c0, c1 = NAV_COLS
     X = np.c_[np.interp(frames[ok], fn, nav[:, c0]), np.interp(frames[ok], fn, nav[:, c1])]
@@ -584,7 +592,7 @@ def nav_pairs(best, poses, kpaths, size, nav):
     if fit is None:
         return None
     rms, mirror, z, Zc = fit
-    print(f"  Навигация: подгонка к цепочке ORB: расхождение {rms:.0f} px, масштаб {abs(z):.1f} px на единицу"
+    log(f"  Навигация: подгонка к цепочке ORB: расхождение {rms:.0f} px, масштаб {abs(z):.1f} px на единицу"
           f"{', зеркало' if mirror else ''}")
     pairs = []
     for L in NAV_LAGS:
@@ -745,7 +753,7 @@ def render(paths, poses, edges=None, width=None, tag="map"):
     sc = min(1.0, MAX_SIDE / max(maxx - minx, maxy - miny))
     Wc, Hc = int(np.ceil((maxx - minx) * sc)) + 1, int(np.ceil((maxy - miny) * sc)) + 1
     px = kk * sc                                           # пикселей карты на пиксель рабочего кадра
-    print(f"Размер карты: {Wc} x {Hc}, кадры шириной {width} px")
+    log(f"Размер карты: {Wc} x {Hc}, кадры шириной {width} px")
 
     def place(M, corners, scale, W, H, mnx, mny):
         Mc = np.zeros((2, 3))
@@ -767,7 +775,7 @@ def render(paths, poses, edges=None, width=None, tag="map"):
     else:
         expo = np.ones(len(paths))
     expo = np.asarray(expo, dtype=np.float32)              # float32, иначе OpenCV (поиск швов) не примет кадры
-    print(f"  Поправки яркости кадров: от {expo.min():.2f} до {expo.max():.2f}")
+    log(f"  Поправки яркости кадров: от {expo.min():.2f} до {expo.max():.2f}")
 
     def prep(p, idx):
         return (ld(p).astype(np.float32) * gain[..., None] * expo[idx]).astype(np.float32)
@@ -803,7 +811,7 @@ def render(paths, poses, edges=None, width=None, tag="map"):
                     use.add(k)
                     last = k
             use.add(len(paths) - 1)
-            print(f"  Для швов отобрано кадров: {len(use)} из {len(paths)} (шаг {RENDER_STEP:.2f} размера кадра)")
+            log(f"  Для швов отобрано кадров: {len(use)} из {len(paths)} (шаг {RENDER_STEP:.2f} размера кадра)")
         for idx, (p, M) in enumerate(zip(paths, poses)):
             if idx not in use:
                 continue
@@ -838,9 +846,9 @@ def render(paths, poses, edges=None, width=None, tag="map"):
             labs[y0:y0 + mk.shape[0], x0:x0 + mk.shape[1]][mk > 0] = idx
         del imgs, masks
         label = cv2.resize(labs, (Wc, Hc), interpolation=cv2.INTER_NEAREST).astype(np.int32)
-        print("  Швы: поиск по совпадению соседних кадров")
+        log("  Швы: поиск по совпадению соседних кадров")
     except (AttributeError, cv2.error) as e:
-        print(f"  Поиск швов недоступен ({e}), беру кадр с лучшим положением")
+        log(f"  Поиск швов недоступен ({e}), беру кадр с лучшим положением")
     def label_by_score():
         """На каждом пикселе берём кадр, у которого это место ближе к центру и не в тёмном углу."""
         best = np.zeros((Hc, Wc), np.float32)
@@ -864,7 +872,7 @@ def render(paths, poses, edges=None, width=None, tag="map"):
         holes = (label < 0) & (fb >= 0)
         if holes.any():
             label[holes] = fb[holes]
-            print(f"  Закрыто пикселей в дырах карты: {int(holes.sum())}")
+            log(f"  Закрыто пикселей в дырах карты: {int(holes.sum())}")
         del fb, holes
     valid = label >= 0
 
@@ -878,7 +886,7 @@ def render(paths, poses, edges=None, width=None, tag="map"):
     # Финальная сборка по блокам: временные накопители ограничены TILE_SIZE.
     mosaic = np.zeros((Hc, Wc, 3), np.uint8)
     tile = max(256, int(TILE_SIZE))
-    print(f"  Тайловая сборка: блок {tile}x{tile}")
+    log(f"  Тайловая сборка: блок {tile}x{tile}")
 
     prep_cache = {}
 
@@ -931,7 +939,7 @@ def render(paths, poses, edges=None, width=None, tag="map"):
             out_tile[~tile_valid] = 0
             mosaic[yb:ye, xb:xe] = np.clip(out_tile, 0, 255).astype(np.uint8)
             valid[yb:ye, xb:xe] &= tile_valid
-        print(f"  Готово строка тайлов y={yb}:{ye} / {Hc}")
+        log(f"  Готово строка тайлов y={yb}:{ye} / {Hc}")
 
     return mosaic, valid, px, centers
 
@@ -1093,9 +1101,9 @@ def save_map(mosaic, valid, name, meta, raw=None):
     try:
         save_geotiff(mosaic, valid, os.path.join(OUT, name + ".tif"))
         info["geotiff"] = name + ".tif"
-        print(f"  GeoTIFF: {name}.tif")
+        log(f"  GeoTIFF: {name}.tif")
     except ValueError as e:
-        print(f"  GeoTIFF не записан: {e}")
+        log(f"  GeoTIFF не записан: {e}")
     with open(os.path.join(OUT, name + ".json"), "w", encoding="utf-8") as f:
         json.dump(info, f, ensure_ascii=False, indent=2)
 
@@ -1268,17 +1276,17 @@ def diagnose(best, edges, poses, kpaths, top=6):
         gk = B @ Mk[:, :2].T + Mk[:, 2]
         r = np.linalg.norm(gj - gk, axis=1)
         rows.append((float(np.sqrt(np.mean(r ** 2))), len(A), fnum(kpaths[j]), fnum(kpaths[k]), j, k, A, B))
-    print("Самые слабые связи (мало совпадений):")
+    log("Самые слабые связи (мало совпадений):")
     for rms, n, a, b, *_ in sorted(rows, key=lambda x: x[1])[:top]:
-        print(f"  кадры {a} -> {b}: совпадений {n}, невязка {rms:.1f} px")
+        log(f"  кадры {a} -> {b}: совпадений {n}, невязка {rms:.1f} px")
 
-    print("Самые большие невязки:")
+    log("Самые большие невязки:")
     worst = sorted(rows, key=lambda x: -x[0])[:top]
     for rms, n, a, b, j, k, A, B in worst:
-        print(f"  кадры {a} -> {b}: совпадений {n}, невязка {rms:.1f} px")
+        log(f"  кадры {a} -> {b}: совпадений {n}, невязка {rms:.1f} px")
     for rms, n, a, b, j, k, A, B in worst[:3]:                  # картинки для 3 худших связей
         draw_link(kpaths[j], kpaths[k], A, B, os.path.join(OUT, f"link_{a}_{b}.png"))
-        print(f"  картинка: link_{a}_{b}.png")
+        log(f"  картинка: link_{a}_{b}.png")
 
 
 def dump_poses(path, nodes, poses, kpaths, size):
@@ -1344,15 +1352,179 @@ def cycle_check(edges, size, max_triplets=4000):
         if cnt >= max_triplets:
             break
     if not cnt:
-        print("  Проверка модели кадра: троек связей не нашлось")
+        log("  Проверка модели кадра: троек связей не нашлось")
         return
     names = ("поворот+масштаб+сдвиг (сейчас)", "аффинная", "перспективная")
-    print(f"  Проверка модели кадра по {cnt} тройкам связей (расхождение цепочки и прямой связи по углам кадра, px):")
+    log(f"  Проверка модели кадра по {cnt} тройкам связей (расхождение цепочки и прямой связи по углам кадра, px):")
     for nm, e in zip(names, errs):
-        print(f"    {nm}: медиана {np.median(e):.1f}, 90% ниже {np.percentile(e, 90):.1f}")
+        log(f"    {nm}: медиана {np.median(e):.1f}, 90% ниже {np.percentile(e, 90):.1f}")
 
 
-def main():
+# ---------- настройки из файла config.json (для интерфейса и для запуска из командной строки) ----------
+CONFIG_PATH = os.path.join(BASE, "config.json")            # по умолчанию лежит в корне проекта, рядом с папкой src
+SCHEMA_PATH = os.path.join(BASE, "params_schema.json")     # описание параметров для интерфейса: подписи, границы, значения (необязателен)
+NOT_CONFIGURABLE = {"BASE", "CACHE_SIZE", "RATIO", "CONFIG_PATH", "SCHEMA_PATH"}
+PATH_PARAMS = ("SRC", "OUT", "LOOP_FILE", "NAV_FILE")
+
+
+class ConfigError(Exception):
+    """Ошибки в настройках. Список понятных сообщений лежит в .problems (интерфейс может показать их пользователю)."""
+    def __init__(self, problems):
+        self.problems = list(problems)
+        super().__init__("Ошибки в настройках:\n" + "\n".join("  - " + p for p in self.problems))
+
+
+def _snapshot_defaults():
+    ok = (bool, int, float, str, type(None), tuple)
+    return {k: v for k, v in globals().items() if k.isupper() and k not in NOT_CONFIGURABLE and isinstance(v, ok)}
+
+
+DEFAULTS = _snapshot_defaults()                            # значения, заданные в коде выше
+
+
+def _load_schema():
+    try:
+        with open(SCHEMA_PATH, encoding="utf-8") as f:
+            return {p["key"]: p for p in json.load(f)["params"]}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
+def read_config(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except OSError as e:
+        raise ConfigError([f"файл настроек не открывается: {path} ({e.strerror or e})"])
+    except ValueError as e:
+        raise ConfigError([f"файл настроек не разобран как JSON: {path} ({e})"])
+    if not isinstance(cfg, dict):
+        raise ConfigError([f"в файле настроек должен быть словарь вида {{\"параметр\": значение}}: {path}"])
+    return cfg
+
+
+def check_loop_file(path):
+    """None, если файл похож на матрицу петель (квадратная таблица чисел через запятую), иначе понятное сообщение."""
+    try:
+        L = np.loadtxt(path, delimiter=",")
+    except (ValueError, OSError):
+        return "это не матрица петель: ожидается таблица из нулей и единиц через запятую (возможно, выбран файл траектории)"
+    if L.ndim != 2 or L.shape[0] != L.shape[1] or L.shape[0] < 10:
+        return "это не квадратная матрица петель"
+    return None
+
+
+def check_nav_file(path):
+    try:
+        nav = load_nav(path)
+    except (ValueError, OSError) as e:
+        return f"файл навигации не прочитан ({e})"
+    if nav.shape[0] < 10 or nav.shape[1] < 3:
+        return "в файле навигации нужно не меньше 10 строк и 3 столбцов: кадр, x, y"
+    if not np.all(np.diff(nav[:, NAV_COL_FRAME]) > 0):
+        return "первый столбец должен быть номером кадра по возрастанию (похоже, это не файл навигации)"
+    return None
+
+
+def apply_config(cfg):
+    """Сначала возвращает все параметры к значениям по умолчанию, потом применяет cfg (словарь параметров).
+    Значения проверяются; при ошибках ничего не применяется и поднимается ConfigError. Возвращает список предупреждений.
+    Относительные пути считаются от корня проекта."""
+    schema = _load_schema()
+    g = globals()
+    for k, v in DEFAULTS.items():
+        g[k] = v
+    errors, warnings, new = [], [], {}
+    for key, val in (cfg or {}).items():
+        if key.startswith("_"):                            # "_comment" и подобное пропускаем
+            continue
+        if key not in DEFAULTS:
+            warnings.append(f"неизвестный параметр «{key}» пропущен")
+            continue
+        d, sp = DEFAULTS[key], schema.get(key, {})
+        name = f"{sp.get('label', key)} ({key})"
+        if key in PATH_PARAMS:
+            if val in (None, ""):
+                if key in ("SRC", "OUT"):
+                    errors.append(f"{name}: путь не может быть пустым")
+                else:
+                    new[key] = None
+                continue
+            if not isinstance(val, str):
+                errors.append(f"{name}: нужен путь в виде текста")
+                continue
+            p = val if os.path.isabs(val) else os.path.join(BASE, val)
+            if key == "SRC" and not os.path.isdir(p):
+                errors.append(f"{name}: папка не найдена: {p}")
+                continue
+            if key in ("LOOP_FILE", "NAV_FILE"):
+                if not os.path.isfile(p):
+                    errors.append(f"{name}: файл не найден: {p}")
+                    continue
+                msg = check_loop_file(p) if key == "LOOP_FILE" else check_nav_file(p)
+                if msg:
+                    errors.append(f"{name}: {msg}")
+                    continue
+            new[key] = p
+            continue
+        is_num = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)
+        if isinstance(d, bool):
+            if not isinstance(val, bool):
+                errors.append(f"{name}: нужно да/нет (true или false)")
+                continue
+        elif isinstance(d, tuple):
+            need = None if key == "NAV_LAGS" else len(d)
+            if not isinstance(val, (list, tuple)) or not val or (need and len(val) != need) or not all(is_num(x) for x in val):
+                errors.append(f"{name}: нужен набор из {need or 'нескольких'} чисел")
+                continue
+            val = tuple(val)
+        elif isinstance(d, str):
+            if not isinstance(val, str):
+                errors.append(f"{name}: нужен текст")
+                continue
+            if sp.get("choices") and val not in sp["choices"]:
+                errors.append(f"{name}: допустимы только значения {sp['choices']}")
+                continue
+        else:                                              # число или пусто
+            if val is None:
+                if d is not None and not sp.get("nullable"):
+                    errors.append(f"{name}: значение не может быть пустым")
+                    continue
+            elif key == "MAP_NAME":
+                val = str(val)
+            elif not is_num(val):
+                errors.append(f"{name}: нужно число")
+                continue
+            else:
+                if sp.get("type") == "int":
+                    if isinstance(val, float) and not val.is_integer():
+                        errors.append(f"{name}: нужно целое число")
+                        continue
+                    val = int(val)
+                if sp.get("min") is not None and val < sp["min"]:
+                    errors.append(f"{name}: не меньше {sp['min']}")
+                    continue
+                if sp.get("max") is not None and val > sp["max"]:
+                    errors.append(f"{name}: не больше {sp['max']}")
+                    continue
+        if key == "GEO_EPSG" and val is not None and 4000 <= int(val) < 5000:
+            errors.append(f"{name}: нужна проекция в метрах (например UTM 326xx или 327xx), а не градусы")
+            continue
+        new[key] = val
+    if new.get("END") is not None and new.get("START", DEFAULTS["START"]) >= new["END"]:
+        errors.append("Диапазон кадров: первый кадр должен быть меньше последнего")
+    if errors:
+        raise ConfigError(errors)
+    g.update(new)
+    return warnings
+
+
+def main(cfg=None):
+    """cfg: словарь параметров (интерфейс передаёт его сам). Если не задан, берётся config.json из корня проекта (если он есть)."""
+    if cfg is None:
+        cfg = read_config(CONFIG_PATH) if os.path.exists(CONFIG_PATH) else {}
+    for w in apply_config(cfg):
+        log("  Настройки: " + w)
     os.makedirs(OUT, exist_ok=True)
     allp = []
     for ext in ("*.png", "*.jpg", "*.jpeg", "*.tif", "*.tiff"):
@@ -1360,11 +1532,11 @@ def main():
     allp = sorted(allp, key=natural_key)[START:END]
     if not allp:
         raise SystemExit(f"Кадров не найдено в {SRC}. Проверь путь и что в папке лежат png/jpg.")
-    print("Кадров в папке:", len(allp))
+    log("Кадров в папке:", len(allp))
     t0 = time.time()
 
     keys = select_keyframes(allp)
-    print(f"Ключевых кадров: {len(keys)} из {len(allp)} ({time.time() - t0:.0f} с)")
+    log(f"Ключевых кадров: {len(keys)} из {len(allp)} ({time.time() - t0:.0f} с)")
     kpaths = [allp[i] for i in keys]
 
     feats = [features(load(p)) for p in kpaths]
@@ -1374,23 +1546,23 @@ def main():
             r = match(feats[j], feats[k])
             if r is not None:
                 edges.append((j, k, r[0], r[1]))
-    print("Связей между кадрами:", len(edges))
+    log("Связей между кадрами:", len(edges))
 
     linked = {k for j, k, _, _ in edges}
     breaks = [fnum(kpaths[k]) for k in range(1, len(keys)) if k not in linked]
-    print("Цепочка рвётся перед кадрами №:", breaks)
+    log("Цепочка рвётся перед кадрами №:", breaks)
 
     size = (load(kpaths[0]).shape[1], load(kpaths[0]).shape[0])
     comps = components(len(kpaths), edges)
-    print("Кусков (связных групп):", len(comps), ", размеры:", [len(c) for c in comps[:8]])
+    log("Кусков (связных групп):", len(comps), ", размеры:", [len(c) for c in comps[:8]])
     if LOOP_SAMPLE and len(comps) > 1:
         t3 = time.time()
         edges = link_pieces(feats, edges, size)
         comps = components(len(kpaths), edges)
-        print(f"После сшивки кусков между собой: {len(comps)} шт., размеры: {[len(c) for c in comps[:8]]} ({time.time() - t3:.0f} с)")
+        log(f"После сшивки кусков между собой: {len(comps)} шт., размеры: {[len(c) for c in comps[:8]]} ({time.time() - t3:.0f} с)")
     orig_w = cv2.imread(allp[0]).shape[1]
     rw = int(min(max(RENDER_WIDTH or WIDTH, WIDTH), orig_w))
-    print(f"Ширина исходных кадров: {orig_w} px; карта собирается из кадров шириной {rw} px")
+    log(f"Ширина исходных кадров: {orig_w} px; карта собирается из кадров шириной {rw} px")
     results = []
     for part, comp in enumerate(comps[:MAX_PARTS]):
         if len(comp) < 5:
@@ -1407,7 +1579,7 @@ def main():
                 nav = load_nav(NAV_FILE)
             except (OSError, ValueError) as e:
                 nav = None
-                print(f"  Навигация не прочитана ({str(e)[:70]}), подсказка не используется")
+                log(f"  Навигация не прочитана ({str(e)[:70]}), подсказка не используется")
             if nav is not None:
                 npairs = nav_pairs(best, poses, kpaths, size, nav)
                 if npairs:
@@ -1415,7 +1587,7 @@ def main():
                     before = [_apply(M, cc)[0] for M in poses]
                     poses, rms = solve(best, cedges, size, npairs)
                     mv = [float(np.linalg.norm(_apply(M, cc)[0] - b0)) for M, b0 in zip(poses, before)]
-                    print(f"  Навигация учтена: положения сдвинулись на {np.median(mv):.0f} px (медиана), до {max(mv):.0f} px")
+                    log(f"  Навигация учтена: положения сдвинулись на {np.median(mv):.0f} px (медиана), до {max(mv):.0f} px")
         if FRAME_MODEL == "affine":
             try:
                 pa, ra = solve_affine(best, cedges, size)
@@ -1424,29 +1596,29 @@ def main():
                 e_a = float(np.median([edge_rms(e, pa, posd_a) for e in cedges]))
                 sv = [np.linalg.svd(M[:, :2], compute_uv=False) for M in pa]
                 aniso = max(float(s_[0] / s_[1]) for s_ in sv)
-                ok_a = np.isfinite(e_a) and aniso < 1.4
-                print(f"  Аффинная модель кадров: невязка по связям медиана {e_a:.2f} px (подобие: {e_s:.2f} px), "
+                ok_a = np.isfinite(e_a) and aniso < 1.25
+                log(f"  Аффинная модель кадров: невязка по связям медиана {e_a:.2f} px (подобие: {e_s:.2f} px), "
                       f"наибольшая неравномерность масштаба по осям {aniso:.2f}" + ("" if ok_a else "; отклонена, оставляю подобие"))
                 if ok_a:
                     poses, rms = pa, ra
             except np.linalg.LinAlgError:
-                print("  Аффинная модель не рассчиталась, оставляю подобие")
+                log("  Аффинная модель не рассчиталась, оставляю подобие")
         poses_pre = poses                                  # положения ДО уточнения по изображению (для диагностики)
         dump_poses(os.path.join(OUT, f"poses_part{part}.json"), best, poses_pre, kpaths, size)
         posd0 = {n: i for i, n in enumerate(best)}
         lo = [edge_rms(e, poses, posd0) for e in cedges if e[1] - e[0] > CROSS_MIN_GAP]
         ch = [edge_rms(e, poses, posd0) for e in cedges if e[1] - e[0] <= CROSS_MIN_GAP]
         if lo and ch:
-            print(f"  Невязка связей-петель: медиана {np.median(lo):.1f} px (обычных связей {np.median(ch):.1f} px), "
+            log(f"  Невязка связей-петель: медиана {np.median(lo):.1f} px (обычных связей {np.median(ch):.1f} px), "
                   f"петель {len({(e[0], e[1]) for e in cedges if e[1] - e[0] > CROSS_MIN_GAP})}")
-        print(f"Кусок {part}: ключевых кадров {len(best)}, "
+        log(f"Кусок {part}: ключевых кадров {len(best)}, "
               f"кадры №{fnum(kpaths[best[0]])}-{fnum(kpaths[best[-1]])}, невязка {rms:.2f} px")
         posd = {n: i for i, n in enumerate(best)}
         er = [edge_rms(e, poses, posd) for e in cedges]
-        print(f"  Невязка по связям: медиана {np.median(er):.2f} px, 90% связей ниже {np.percentile(er, 90):.2f} px, "
+        log(f"  Невязка по связям: медиана {np.median(er):.2f} px, 90% связей ниже {np.percentile(er, 90):.2f} px, "
               f"больше {PRUNE_MIN_PX:.0f} px: {sum(x > PRUNE_MIN_PX for x in er)} из {len(er)}")
         sc_all = [float(np.hypot(M[0, 0], M[1, 0])) for M in poses]
-        print(f"  Масштаб кадров: от {min(sc_all):.2f} до {max(sc_all):.2f} (первый = 1.00)")
+        log(f"  Масштаб кадров: от {min(sc_all):.2f} до {max(sc_all):.2f} (первый = 1.00)")
         if part == 0:
             diagnose(best, cedges, poses_pre, kpaths)      # невязки общего расчёта, а не после refine
             cycle_check(cedges, size)
@@ -1455,10 +1627,10 @@ def main():
             poses, st = refine_poses([kpaths[i] for i in best], poses)
             sh = st["shifts"]
             er2 = [edge_rms(e, poses, posd) for e in cedges]
-            print(f"  Уточнение по изображению: сдвинуто {st['moved']} из {len(best)} кадров, отклонено {st['rejected']}, "
+            log(f"  Уточнение по изображению: сдвинуто {st['moved']} из {len(best)} кадров, отклонено {st['rejected']}, "
                   f"без перекрытия {st['free']}; сдвиг медиана {np.median(sh) if sh else 0:.1f} px, макс {max(sh) if sh else 0:.1f} px "
                   f"({time.time() - t2:.0f} с)")
-            print(f"  Невязка по связям ORB после уточнения: медиана {np.median(er2):.2f} px (было {np.median(er):.2f})")
+            log(f"  Невязка по связям ORB после уточнения: медиана {np.median(er2):.2f} px (было {np.median(er):.2f})")
         dump_poses(os.path.join(OUT, f"poses_refined_part{part}.json"), best, poses, kpaths, size)
         t1 = time.time()
         loc = {n: i for i, n in enumerate(best)}
@@ -1467,27 +1639,36 @@ def main():
         # Сначала выравниваем плавный свет, затем выполняем обычное улучшение.
         flat = flat_field_correction(raw, valid, px) if FLAT_FIELD else raw
         mosaic = enhance(flat, valid, px) if ENHANCE else flat
-        print(f"  Сборка и улучшение: {time.time() - t1:.0f} с")
-        name = f"orb_s{START}_part{part}_n{len(best)}"
+        log(f"  Сборка и улучшение: {time.time() - t1:.0f} с")
+        base = re.sub(r'[\\/:*?"<>|\s]+', "_", str(MAP_NAME).strip()).strip("_") if MAP_NAME else ""
+        name = f"{base or f'orb_s{START}'}_part{part}_n{len(best)}"
         save_map(mosaic, valid, name, {"source": "ORB + общая подгонка", "keyframes_used": len(best),
                                        "first_frame": fnum(kpaths[best[0]]), "last_frame": fnum(kpaths[best[-1]]),
                                        "frames_total": len(allp), "rms_px": round(rms, 3),
+                                       "title": str(MAP_NAME) if MAP_NAME else None,
                                        "render_width": rw, "refined": bool(REFINE),
                                        "crossovers": bool(CROSS_ENABLE),
                                        "trajectory_px": [{"frame": fnum(kpaths[n]), "x": round(float(c[0]), 1), "y": round(float(c[1]), 1)}
                                                          for n, c in zip(best, centers)]},
                  raw=raw if ENHANCE else None)
-        print(f"  Файл: {name}.png, размер {mosaic.shape[1]}x{mosaic.shape[0]}")
+        log(f"  Файл: {name}.png, размер {mosaic.shape[1]}x{mosaic.shape[0]}")
         if TRAJ_DRAW:
             draw_trajectory(mosaic, valid, centers, os.path.join(OUT, name + "_traj.png"))
-            print(f"  Путь аппарата: {name}_traj.png")
+            log(f"  Путь аппарата: {name}_traj.png")
         if TRAJ_EXPORT:
             save_trajectory(name, [fnum(kpaths[n]) for n in best], centers)
-            print(f"  Путь аппарата: {name}_traj.geojson, {name}_traj.csv")
+            log(f"  Путь аппарата: {name}_traj.geojson, {name}_traj.csv")
         results.append((best, poses))
-    print(f"Готово за {time.time() - t0:.0f} с.")
+    log(f"Готово за {time.time() - t0:.0f} с.")
     return keys, results
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    ap = argparse.ArgumentParser(description="Сборка мозаики морского дна из кадров")
+    ap.add_argument("--config", help="путь к файлу настроек (по умолчанию config.json в корне проекта)")
+    args = ap.parse_args()
+    try:
+        main(read_config(args.config) if args.config else None)
+    except ConfigError as e:
+        raise SystemExit(str(e))

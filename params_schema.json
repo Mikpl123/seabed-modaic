@@ -1,0 +1,528 @@
+{
+  "version": 1,
+  "note": "Описание настроек для интерфейса. key = имя параметра в config.json и в mosaic_orb.py; advanced = прятать во вкладке «Дополнительно».",
+  "groups": [
+    "Файлы и диапазон",
+    "Качество и размер",
+    "Вид карты",
+    "Путь аппарата",
+    "Повторные проходы",
+    "Дополнительно",
+    "Привязка к координатам (GeoTIFF)",
+    "Навигация и эксперименты"
+  ],
+  "params": [
+    {
+      "key": "SRC",
+      "label": "Папка с кадрами",
+      "group": "Файлы и диапазон",
+      "type": "folder",
+      "default": "dataset",
+      "advanced": false,
+      "hint": "Папка, где лежат кадры (png, jpg, tif). Путь можно задать относительно корня проекта."
+    },
+    {
+      "key": "OUT",
+      "label": "Папка для результата",
+      "group": "Файлы и диапазон",
+      "type": "folder",
+      "default": "output",
+      "advanced": false,
+      "hint": "Сюда пишутся карта, GeoTIFF, путь аппарата и служебные файлы."
+    },
+    {
+      "key": "START",
+      "label": "Первый кадр",
+      "group": "Файлы и диапазон",
+      "type": "int",
+      "default": 0,
+      "advanced": false,
+      "hint": "Номер по порядку (с нуля), с которого начинать.",
+      "min": 0
+    },
+    {
+      "key": "END",
+      "label": "Последний кадр",
+      "group": "Файлы и диапазон",
+      "type": "int",
+      "default": null,
+      "advanced": false,
+      "hint": "Пусто = до конца ролика.",
+      "nullable": true,
+      "min": 1
+    },
+    {
+      "key": "MAP_NAME",
+      "label": "Название карты",
+      "group": "Файлы и диапазон",
+      "type": "text",
+      "default": null,
+      "advanced": false,
+      "hint": "Начало имён всех выходных файлов. Знаки вроде / : * ? заменяются на _. Пусто = имя по умолчанию.",
+      "nullable": true
+    },
+    {
+      "key": "RENDER_WIDTH",
+      "label": "Чёткость карты (ширина кадров при сборке, px)",
+      "group": "Качество и размер",
+      "type": "int",
+      "default": 960,
+      "advanced": false,
+      "hint": "Больше = чётче, но дольше и больше памяти. Не больше ширины исходных кадров.",
+      "min": 480,
+      "max": 4000
+    },
+    {
+      "key": "MAX_SIDE",
+      "label": "Максимальный размер карты (px по большей стороне)",
+      "group": "Качество и размер",
+      "type": "int",
+      "default": 4000,
+      "advanced": false,
+      "hint": "Ограничивает размер файла. Выше 8000 нужна память.",
+      "min": 500,
+      "max": 20000
+    },
+    {
+      "key": "RENDER_STEP",
+      "label": "Плотность кадров для швов",
+      "group": "Качество и размер",
+      "type": "float",
+      "default": 0.45,
+      "advanced": false,
+      "hint": "0 = брать все кадры; 0,45 = реже и шире полосы (меньше повторяющегося узора на неровном дне).",
+      "min": 0,
+      "max": 0.8
+    },
+    {
+      "key": "ENHANCE",
+      "label": "Улучшить картинку",
+      "group": "Вид карты",
+      "type": "bool",
+      "default": true,
+      "advanced": false,
+      "hint": "Исходный вариант без улучшения (*_raw.png) сохраняется рядом."
+    },
+    {
+      "key": "TARGET_MEAN",
+      "label": "Яркость",
+      "group": "Вид карты",
+      "type": "int",
+      "default": 145,
+      "advanced": false,
+      "hint": "Средняя яркость готовой карты, 0–255. Пусто = не менять.",
+      "nullable": true,
+      "min": 0,
+      "max": 255
+    },
+    {
+      "key": "CONTRAST",
+      "label": "Контраст",
+      "group": "Вид карты",
+      "type": "float",
+      "default": 1.8,
+      "advanced": false,
+      "hint": "1 = без изменений.",
+      "min": 0.5,
+      "max": 4
+    },
+    {
+      "key": "SHARPEN",
+      "label": "Резкость",
+      "group": "Вид карты",
+      "type": "float",
+      "default": 0.35,
+      "advanced": false,
+      "hint": "0 = выкл.",
+      "min": 0,
+      "max": 2
+    },
+    {
+      "key": "CLARITY",
+      "label": "Локальный контраст",
+      "group": "Вид карты",
+      "type": "float",
+      "default": 0.2,
+      "advanced": false,
+      "hint": "0 = выкл.",
+      "min": 0,
+      "max": 1
+    },
+    {
+      "key": "BG_STRENGTH",
+      "label": "Убрать муть",
+      "group": "Вид карты",
+      "type": "float",
+      "default": 0.7,
+      "advanced": false,
+      "hint": "Насколько вычитать «дымку» воды, 0–1.",
+      "min": 0,
+      "max": 1
+    },
+    {
+      "key": "DENOISE_H",
+      "label": "Убрать шум",
+      "group": "Вид карты",
+      "type": "float",
+      "default": 3.0,
+      "advanced": false,
+      "hint": "0 = выкл.",
+      "min": 0,
+      "max": 20
+    },
+    {
+      "key": "FLAT_FIELD",
+      "label": "Выровнять свет",
+      "group": "Вид карты",
+      "type": "bool",
+      "default": true,
+      "advanced": false,
+      "hint": "Убирает светлые и тёмные пятна от лампы аппарата."
+    },
+    {
+      "key": "FLAT_STRENGTH",
+      "label": "Сила выравнивания света",
+      "group": "Вид карты",
+      "type": "float",
+      "default": 0.55,
+      "advanced": false,
+      "hint": "0–1.",
+      "min": 0,
+      "max": 1
+    },
+    {
+      "key": "TRAJ_DRAW",
+      "label": "Показывать путь на карте",
+      "group": "Путь аппарата",
+      "type": "bool",
+      "default": true,
+      "advanced": false,
+      "hint": "Сохраняется отдельная картинка *_traj.png."
+    },
+    {
+      "key": "TRAJ_EXPORT",
+      "label": "Сохранить путь в файл",
+      "group": "Путь аппарата",
+      "type": "bool",
+      "default": true,
+      "advanced": false,
+      "hint": "Файлы *_traj.geojson (для QGIS) и *_traj.csv."
+    },
+    {
+      "key": "TRAJ_START_HUE",
+      "label": "Цвет линии в начале",
+      "group": "Путь аппарата",
+      "type": "hue",
+      "default": 95,
+      "advanced": false,
+      "hint": "Оттенок 0–179 (шкала OpenCV: 95 = голубой, 8 = оранжевый). Произвольный цвет пока не поддерживается.",
+      "min": 0,
+      "max": 179
+    },
+    {
+      "key": "TRAJ_END_HUE",
+      "label": "Цвет линии в конце",
+      "group": "Путь аппарата",
+      "type": "hue",
+      "default": 8,
+      "advanced": false,
+      "hint": "Оттенок 0–179. Между началом и концом цвет меняется плавно.",
+      "min": 0,
+      "max": 179
+    },
+    {
+      "key": "TRAJ_SMOOTH",
+      "label": "Гладкость линии",
+      "group": "Путь аппарата",
+      "type": "int",
+      "default": 2,
+      "advanced": false,
+      "hint": "0 = без сглаживания.",
+      "min": 0,
+      "max": 4
+    },
+    {
+      "key": "TRAJ_ARROW_SPACING",
+      "label": "Расстояние между стрелками (px карты)",
+      "group": "Путь аппарата",
+      "type": "int",
+      "default": 240,
+      "advanced": false,
+      "hint": "",
+      "min": 60,
+      "max": 2000
+    },
+    {
+      "key": "TRAJ_START_TEXT",
+      "label": "Подпись начала",
+      "group": "Путь аппарата",
+      "type": "text",
+      "default": "старт",
+      "advanced": false,
+      "hint": "Для кириллицы нужен Pillow; без него подпись будет латиницей."
+    },
+    {
+      "key": "TRAJ_END_TEXT",
+      "label": "Подпись конца",
+      "group": "Путь аппарата",
+      "type": "text",
+      "default": "конец",
+      "advanced": false,
+      "hint": ""
+    },
+    {
+      "key": "CROSS_ENABLE",
+      "label": "Совмещать повторные проходы",
+      "group": "Повторные проходы",
+      "type": "bool",
+      "default": true,
+      "advanced": false,
+      "hint": "Нужно, если аппарат возвращался на то же место."
+    },
+    {
+      "key": "CROSS_TOP",
+      "label": "Тщательность поиска повторов",
+      "group": "Повторные проходы",
+      "type": "int",
+      "default": 450,
+      "advanced": false,
+      "hint": "Сколько пар кадров проверять: 150 = быстро, 450 = тщательно.",
+      "min": 0,
+      "max": 2000
+    },
+    {
+      "key": "LOOP_WEIGHT",
+      "label": "Усиление повторных проходов",
+      "group": "Повторные проходы",
+      "type": "int",
+      "default": 3,
+      "advanced": true,
+      "hint": "1 = как обычно; 3 рекомендуется.",
+      "min": 1,
+      "max": 10
+    },
+    {
+      "key": "EXCLUSIVE_PASSES",
+      "label": "Первый проход главнее второго",
+      "group": "Повторные проходы",
+      "type": "bool",
+      "default": true,
+      "advanced": true,
+      "hint": "Убирает двойные объекты на повторном проходе."
+    },
+    {
+      "key": "LOOP_FILE",
+      "label": "Файл петель COLMAP (необязательно)",
+      "group": "Повторные проходы",
+      "type": "file",
+      "default": null,
+      "advanced": true,
+      "hint": "Матрица из 0 и 1 через запятую (colmap_detected_loop_*.txt). Без неё повторы ищутся по виду, результат почти такой же. Если выбран другой файл, например траектория, программа сообщит об ошибке.",
+      "nullable": true
+    },
+    {
+      "key": "LOOP_FILE_STEP",
+      "label": "Кадров на ячейку файла петель",
+      "group": "Повторные проходы",
+      "type": "int",
+      "default": 20,
+      "advanced": true,
+      "hint": "Только вместе с файлом петель.",
+      "min": 1,
+      "max": 100
+    },
+    {
+      "key": "MIN_SHIFT",
+      "label": "Как часто брать ключевые кадры",
+      "group": "Дополнительно",
+      "type": "float",
+      "default": 0.15,
+      "advanced": true,
+      "hint": "Доля размера кадра: меньше = больше кадров, медленнее.",
+      "min": 0.03,
+      "max": 0.6
+    },
+    {
+      "key": "MIN_INLIERS",
+      "label": "Строгость проверки совпадений",
+      "group": "Дополнительно",
+      "type": "int",
+      "default": 25,
+      "advanced": true,
+      "hint": "Минимум надёжных совпадений для связи. Ниже 20 появляются ложные связи.",
+      "min": 20,
+      "max": 200
+    },
+    {
+      "key": "NEIGHBORS",
+      "label": "С каким числом соседей сверять кадр",
+      "group": "Дополнительно",
+      "type": "int",
+      "default": 5,
+      "advanced": true,
+      "hint": "",
+      "min": 1,
+      "max": 12
+    },
+    {
+      "key": "MAX_PARTS",
+      "label": "Сколько кусков сохранять",
+      "group": "Дополнительно",
+      "type": "int",
+      "default": 3,
+      "advanced": true,
+      "hint": "Если всё склеить в одну карту не удалось.",
+      "min": 1,
+      "max": 10
+    },
+    {
+      "key": "REFINE",
+      "label": "Уточнение по изображению",
+      "group": "Дополнительно",
+      "type": "bool",
+      "default": true,
+      "advanced": true,
+      "hint": ""
+    },
+    {
+      "key": "EXPOSURE_MATCH",
+      "label": "Подгонка яркости между кадрами",
+      "group": "Дополнительно",
+      "type": "bool",
+      "default": true,
+      "advanced": true,
+      "hint": ""
+    },
+    {
+      "key": "FILL_HOLES",
+      "label": "Закрывать пустые места",
+      "group": "Дополнительно",
+      "type": "bool",
+      "default": true,
+      "advanced": true,
+      "hint": "Закрывает дыры, которые видят кадры. Настоящие пробелы съёмки не закрывает."
+    },
+    {
+      "key": "DEBUG_LABELS",
+      "label": "Сохранять отладочную карту швов",
+      "group": "Дополнительно",
+      "type": "bool",
+      "default": true,
+      "advanced": true,
+      "hint": "Для тестировщика: debug_labels_*.png."
+    },
+    {
+      "key": "FEATHER",
+      "label": "Размытие шва для деталей",
+      "group": "Дополнительно",
+      "type": "float",
+      "default": 4.0,
+      "advanced": true,
+      "hint": "Не показывать обычному пользователю: большие значения дают двоение.",
+      "min": 0,
+      "max": 30
+    },
+    {
+      "key": "FEATHER_LOW",
+      "label": "Размытие шва для света",
+      "group": "Дополнительно",
+      "type": "float",
+      "default": 25.0,
+      "advanced": true,
+      "hint": "",
+      "min": 0,
+      "max": 150
+    },
+    {
+      "key": "TILE_SIZE",
+      "label": "Размер блока сборки",
+      "group": "Дополнительно",
+      "type": "int",
+      "default": 1024,
+      "advanced": true,
+      "hint": "Меньше = меньше памяти.",
+      "min": 256,
+      "max": 4096
+    },
+    {
+      "key": "GEO_EPSG",
+      "label": "Система координат (код в метрах)",
+      "group": "Привязка к координатам (GeoTIFF)",
+      "type": "int",
+      "default": null,
+      "advanced": false,
+      "hint": "Например 32755 (UTM 55S). Не градусы. Пусто = локальные координаты.",
+      "nullable": true,
+      "min": 1
+    },
+    {
+      "key": "GEO_ORIGIN",
+      "label": "Координаты левого верхнего угла (X, Y)",
+      "group": "Привязка к координатам (GeoTIFF)",
+      "type": "pair",
+      "default": [
+        0.0,
+        0.0
+      ],
+      "advanced": false,
+      "hint": "В метрах."
+    },
+    {
+      "key": "GEO_MPP",
+      "label": "Метров на пиксель",
+      "group": "Привязка к координатам (GeoTIFF)",
+      "type": "float",
+      "default": null,
+      "advanced": false,
+      "hint": "Пусто = масштаб неизвестен (1 пиксель = 1 единица).",
+      "nullable": true,
+      "min": 0.0001
+    },
+    {
+      "key": "NAV_FILE",
+      "label": "Файл навигации (необязательно)",
+      "group": "Навигация и эксперименты",
+      "type": "file",
+      "default": null,
+      "advanced": true,
+      "hint": "Строки «кадр x y …». На Aqualoc ухудшает локальные связи: включать только с реальной навигацией и мягко.",
+      "nullable": true
+    },
+    {
+      "key": "NAV_COLS",
+      "label": "Столбцы x и y в файле навигации",
+      "group": "Навигация и эксперименты",
+      "type": "pair",
+      "default": [
+        1,
+        2
+      ],
+      "advanced": true,
+      "hint": "Номера столбцов с нуля."
+    },
+    {
+      "key": "NAV_WEIGHT",
+      "label": "Жёсткость подсказки навигации",
+      "group": "Навигация и эксперименты",
+      "type": "float",
+      "default": 1.0,
+      "advanced": true,
+      "hint": "0,3 = мягко, 1 = как цепочка кадров, 3 = жёстко.",
+      "min": 0,
+      "max": 10
+    },
+    {
+      "key": "FRAME_MODEL",
+      "label": "Модель положения кадра",
+      "group": "Навигация и эксперименты",
+      "type": "choice",
+      "default": "similarity",
+      "advanced": true,
+      "hint": "affine пока не проверена на реальных кадрах.",
+      "choices": [
+        "similarity",
+        "affine"
+      ]
+    }
+  ]
+}
